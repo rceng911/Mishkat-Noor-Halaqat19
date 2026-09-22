@@ -1,0 +1,21 @@
+{% extends 'base.html' %}
+{% block content %}
+<link rel="stylesheet" href="/static/halaqat.css?build=app">
+<link rel="stylesheet" href="/static/student-file.css?build=app">
+<link rel="stylesheet" href="/static/families.css?build=app">
+<main class="halaqat-shell" id="halaqatApp">
+  <header class="halaqat-header">
+    <div><small>حلقات مشكاة ونور{% if show_version %} · الإصدار {{app_version}}{% endif %}</small><h1>إدارة حلقات القرآن</h1><p>حسابات وصلاحيات وبيانات محفوظة لكل حلقة.</p></div>
+    <div class="halaqat-actions"><a href="/account/security">تغيير الرمز</a><form action="/logout" method="post"><button type="submit">تسجيل الخروج</button></form></div>
+  </header>
+  <section class="halaqat-toolbar panel">
+    <label>المسجد أو الجهة<select id="halaqatMosque"></select></label>
+    <p id="halaqatStatus" role="status" aria-live="polite">جارٍ تحميل البيانات…</p>
+  </section>
+  <div id="halaqatCredentials" class="credentials" hidden></div>
+  <section id="halaqatStats" class="halaqat-stats"></section>
+  <section id="halaqatWorkspace"></section>
+<section id="studentFile" hidden></section>
+</main>
+<script src="/static/halaqat.js?build=app"></script>
+{% endblock %}

@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: mishkat-halaqat-v88
+    runtime: docker
+    rootDir: "Mishkat Noor Halaqat"
+    dockerContext: .
+    plan: starter
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    autoDeployTrigger: commit
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: mishkat-halaqat-v88-db
+          property: connectionString
+      - key: OWNER_SETUP_TOKEN
+        generateValue: true
+      - key: SESSION_HOURS
+        value: "24"
+      - key: REMEMBER_DAYS
+        value: "30"
+databases:
+  - name: mishkat-halaqat-v88-db
+    plan: basic-256mb
+    region: frankfurt
+    diskSizeGB: 1
+    ipAllowList: []

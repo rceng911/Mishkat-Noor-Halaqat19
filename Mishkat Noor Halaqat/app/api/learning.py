@@ -49,6 +49,7 @@ class MistakeInput(Input):
     surah:int=Field(ge=1,le=114)
     ayah:int=Field(ge=1,le=286)
     kind:Literal['memory','similar','tajweed','pronunciation']
+    support:Literal['strong','light','review']='review'
     notes:str=Field('',max_length=1000)
     resolved:bool=False
     @model_validator(mode='after')
@@ -96,7 +97,7 @@ def student_learning(mid:int,sid:int,request:Request,db=Depends(get_db)):
     mistakes=db.scalars(select(RecitationMistake).where(RecitationMistake.student_id==sid).order_by(RecitationMistake.day.desc(),RecitationMistake.id.desc())).all()
     counts=Counter((m.surah,m.ayah,m.kind) for m in mistakes)
     home=db.scalars(select(HomePractice).where(HomePractice.student_id==sid).order_by(HomePractice.day.desc())).all()
-    return {'goal':goal_pack(db.get(CompletionGoal,sid)),'kinds':KINDS,'surahs':SURAH_NAMES,'mistakes':[{'id':m.id,'day':str(m.day),'surah':m.surah,'surah_name':SURAH_NAMES[m.surah-1],'ayah':m.ayah,'kind':m.kind,'notes':m.notes,'resolved':m.resolved,'repetitions':counts[m.surah,m.ayah,m.kind]} for m in mistakes],'home':[{'id':h.id,'day':str(h.day),'assignment_id':h.assignment_id,'minutes':h.minutes,'notes':h.notes,'guardian':db.get(User,h.guardian_id).full_name} for h in home],'can_practice':u.role==STUDENT_ROLE and u.account_type=='guardian' and s.recipient_type=='guardian' and s.active}
+    return {'goal':goal_pack(db.get(CompletionGoal,sid)),'kinds':KINDS,'surahs':SURAH_NAMES,'ayah_counts':AYAH_COUNTS,'mistakes':[{'id':m.id,'day':str(m.day),'surah':m.surah,'surah_name':SURAH_NAMES[m.surah-1],'ayah':m.ayah,'kind':m.kind,'support':m.support,'notes':m.notes,'resolved':m.resolved,'repetitions':counts[m.surah,m.ayah,m.kind]} for m in mistakes],'home':[{'id':h.id,'day':str(h.day),'assignment_id':h.assignment_id,'minutes':h.minutes,'notes':h.notes,'guardian':db.get(User,h.guardian_id).full_name} for h in home],'can_practice':u.role==STUDENT_ROLE and u.account_type=='guardian' and s.recipient_type=='guardian' and s.active}
 
 class QueueInput(Input):
     day:date

@@ -14,7 +14,7 @@ def test_setup_and_isolation(owner):
     for route in ("/owner", "/screen", "/community", "/accessibility", "/register", "/api/v79/owner/users"):
         assert owner.get(route).status_code == 404
     assert owner.get("/healthz").json() == {"ok": True}
-    assert "الإصدار 19" in owner.get("/halaqat").text
+    assert "الإصدار 20" in owner.get("/halaqat").text
     assert owner.post("/setup",data={"organization":"ثان","full_name":"مالك آخر","username":"مالك_آخر","password":"OwnerPass1@","confirm_password":"OwnerPass1@"}, follow_redirects=False).headers["location"] == "/login"
     with SessionLocal() as db:
         assert len(db.scalars(select(User).where(User.role=="owner")).all()) == 1
@@ -116,7 +116,7 @@ def test_login_throttle(owner):
 
 def test_remember_me_and_hidden_version(owner):
     with TestClient(app) as c:
-        assert "الإصدار 19" not in c.get("/login").text
+        assert "الإصدار 20" not in c.get("/login").text
         ordinary = c.post("/login", data={"identity":"المالك","password":"OwnerPass1@"}, follow_redirects=False)
         assert "max-age=" not in ordinary.headers["set-cookie"].lower()
     with TestClient(app) as c:
@@ -149,7 +149,7 @@ def test_family_account_multiple_children_and_complete_request(network):
         dashboard = family.get(BASE+"/dashboard").json()
         assert {s["name"] for s in dashboard["students"]} == {"الابن الأول", "الابن الثاني"}
         assert dashboard["students"][0]["guardian_name"] == "أب الأسرة"
-        assert "الإصدار 19" not in family.get("/halaqat").text
+        assert "الإصدار 20" not in family.get("/halaqat").text
     accounts = n["owner"].get(BASE+"/dashboard").json()["accounts"]
     family_account = next(a for a in accounts if a["id"] == family_user_id)
     assert {c["name"] for c in family_account["children"]} == {"الابن الأول", "الابن الثاني"}

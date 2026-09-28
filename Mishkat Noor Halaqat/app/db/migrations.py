@@ -4,6 +4,7 @@ from sqlalchemy import inspect, text
 
 def ensure_v10_schema(engine):
     additions = {
+        "recitation_mistakes": {"support": "VARCHAR(20) DEFAULT 'review'"},
         "users": {"account_type": "VARCHAR(20) DEFAULT ''", "phone": "VARCHAR(40) DEFAULT ''", "staff_notes": "TEXT DEFAULT ''"},
         "halaqa_students": {
             "recipient_type": "VARCHAR(20) DEFAULT 'guardian'",

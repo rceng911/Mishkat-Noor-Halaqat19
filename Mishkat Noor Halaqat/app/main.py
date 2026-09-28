@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 import hashlib
 import secrets
+import os
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Form, Request
@@ -35,7 +36,14 @@ async def lifespan(app):
                 db.commit()
             except IntegrityError:
                 db.rollback()
-    yield
+    from app.services.notifications import start_worker
+    worker = start_worker() if os.getenv('NOTIFICATION_WORKER', '1' if settings.secure_cookie else '0') == '1' else None
+    try:
+        yield
+    finally:
+        if worker:
+            worker[0].set()
+            worker[1].join(timeout=2)
 
 app = FastAPI(title="حلقات مشكاة ونور", version=settings.app_version, lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 app.mount("/static", StaticFiles(directory=str(ROOT / "web" / "static")), name="static")
@@ -50,6 +58,20 @@ from app.api.management import router as management_router
 app.include_router(management_router)
 from app.api.learning import router as learning_router
 app.include_router(learning_router)
+from app.api.advancement import router as advancement_router
+from app.api.notifications import router as notifications_router
+app.include_router(advancement_router)
+app.include_router(notifications_router)
+
+@app.get('/sw.js')
+def service_worker():
+    from fastapi.responses import FileResponse
+    return FileResponse(ROOT / 'web' / 'static' / 'sw.js', media_type='application/javascript', headers={'Service-Worker-Allowed':'/', 'Cache-Control':'no-cache'})
+
+@app.get('/offline')
+def offline_page():
+    from fastapi.responses import FileResponse
+    return FileResponse(ROOT / 'web' / 'static' / 'offline.html',media_type='text/html')
 
 def user_for(request):
     s = session(request)

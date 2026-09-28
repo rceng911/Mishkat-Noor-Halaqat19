@@ -231,6 +231,10 @@ def assess_exam(mid:int,sid:int,eid:int,data:ResultInput,request:Request,db=Depe
     if not exam or exam.student_id!=sid:raise HTTPException(404,'الاختبار غير موجود')
     if exam.status=='cancelled':raise HTTPException(409,'الاختبار ملغى')
     if data.day<exam.due:raise HTTPException(422,'لا يمكن تسجيل نتيجة قبل موعد الاختبار')
+    from app.models import ExamBooking
+    booking=db.get(ExamBooking,eid)
+    if booking and booking.approved:raise HTTPException(409,'اعتمد انتقال المستوى؛ لا يمكن تغيير النتيجة بعد الاعتماد')
+    if booking and u.role==TEACHER_ROLE and u.id!=booking.examiner_id:raise HTTPException(403,'تسجيل النتيجة للمختبر المحدد أو المشرف')
     criteria=json.loads(exam.criteria_json)
     if len(data.scores)!=len(criteria) or any(v>c['maximum'] for v,c in zip(data.scores,criteria)):raise HTTPException(422,'الدرجات لا تطابق معايير الاختبار')
     total=sum(c['maximum'] for c in criteria);score=sum(data.scores);passed=100*score/total>=exam.pass_percent

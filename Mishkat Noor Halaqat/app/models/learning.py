@@ -23,6 +23,7 @@ class RecitationMistake(Base):
     surah:Mapped[int]=mapped_column(Integer)
     ayah:Mapped[int]=mapped_column(Integer)
     kind:Mapped[str]=mapped_column(String(30))
+    support:Mapped[str]=mapped_column(String(20),default='review')
     notes:Mapped[str]=mapped_column(Text,default='')
     resolved:Mapped[bool]=mapped_column(Boolean,default=False)
     recorded_by:Mapped[int]=mapped_column(ForeignKey('users.id'))

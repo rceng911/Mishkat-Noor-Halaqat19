@@ -58,7 +58,18 @@ class ExamInput(Input):
 
 class CertificateInput(Input):
     title: str = Field(min_length=2, max_length=180)
-    achievement: str = Field(min_length=2, max_length=2000)
+    achievement: str = Field("", max_length=2000)
+    memorization_scope: str = Field("", max_length=250)
+    mastery_percent: float | None = Field(None, ge=0, le=100, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_certificate(self):
+        if self.memorization_scope:
+            if len(self.memorization_scope) < 2 or self.mastery_percent is None:
+                raise ValueError("حدد مقدار الحفظ ونسبة الإتقان")
+        elif len(self.achievement) < 2 or self.mastery_percent is not None:
+            raise ValueError("حدد مقدار الحفظ ونسبة الإتقان")
+        return self
 
 def access_student(db, request, mid, sid, write=False):
     roles = PORTAL_ROLES - {STUDENT_ROLE} if write else PORTAL_ROLES
@@ -142,7 +153,11 @@ def create_certificate(mid: int, sid: int, data: CertificateInput, request: Requ
     u, s = access_student(db, request, mid, sid, True)
     if u.role not in ("owner", SUPERVISOR_ROLE):
         raise HTTPException(403, "إصدار الشهادة من صلاحية المالك والمشرف")
-    row = StudentCertificate(student_id=sid, issued_by=u.id, issued_on=today(), **data.model_dump())
+    values = data.model_dump()
+    if data.memorization_scope:
+        values['achievement'] = f"أكمل حفظ {data.memorization_scope} بنسبة إتقان {data.mastery_percent:g}%"
+    row = StudentCertificate(student_id=sid, issued_by=u.id, issued_on=today(),
+        student_name=s.full_name, student_national_id=s.national_id or '', **values)
     db.add(row); audit(db, u.id, mid, "student_certificate_issued", str(sid)); db.commit()
     return {"ok": True, "id": row.id}
 

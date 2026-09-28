@@ -6,7 +6,7 @@
 <link rel="stylesheet" href="/static/calm.css?build=app">
 <main class="halaqat-shell" id="halaqatApp">
   <header class="halaqat-header">
-    <div><small>حلقات مشكاة ونور{% if show_version %} · الإصدار {{app_version}}{% endif %}</small><h1>إدارة حلقات القرآن</h1><p>حسابات وصلاحيات وبيانات محفوظة لكل حلقة.</p></div>
+    <div class="app-brand"><img class="brand-logo" src="/static/brand-logo.png" alt="شعار مشكاة ونور"><div><small>حلقات مشكاة ونور{% if show_version %} · الإصدار {{app_version}}{% endif %}</small><h1>إدارة حلقات القرآن</h1><p>حسابات وصلاحيات وبيانات محفوظة لكل حلقة.</p></div></div>
     <div class="halaqat-actions"><a href="/account/security">تغيير الرمز</a><form action="/logout" method="post"><button type="submit">تسجيل الخروج</button></form></div>
   </header>
   <section class="halaqat-toolbar panel">
@@ -18,5 +18,5 @@
   <section id="halaqatWorkspace"></section>
 <section id="studentFile" hidden></section>
 </main>
-<script src="/static/halaqat.js?build=app"></script>
+<script src="/static/halaqat.js?build=20.4"></script>
 {% endblock %}

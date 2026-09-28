@@ -1,5 +1,5 @@
 {% extends "base.html" %}{% block content %}
-<main class="auth-page"><section class="auth-card"><small class="brand">حلقات مشكاة ونور</small><h1>{{title}}</h1>
+<main class="auth-page"><section class="auth-card"><img class="brand-logo auth-logo" src="/static/brand-logo.png" alt="شعار مشكاة ونور"><small class="brand">حلقات مشكاة ونور</small><h1>{{title}}</h1>
 {% if error %}<div class="error-box" role="alert">{{error}}</div>{% endif %}
 {% if mode == "setup" %}
 <p>أنشئ حسابك كمالك للنظام. بعدها يمكنك إنشاء حسابات المشرفين واعتماد طلبات المدرسين والطلاب.</p>

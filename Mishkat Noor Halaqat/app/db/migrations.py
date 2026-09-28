@@ -4,6 +4,12 @@ from sqlalchemy import inspect, text
 
 def ensure_v10_schema(engine):
     additions = {
+        "student_certificates": {
+            "memorization_scope": "VARCHAR(250) DEFAULT ''",
+            "mastery_percent": "FLOAT",
+            "student_name": "VARCHAR(180) DEFAULT ''",
+            "student_national_id": "VARCHAR(30) DEFAULT ''",
+        },
         "recitation_mistakes": {"support": "VARCHAR(20) DEFAULT 'review'"},
         "users": {"account_type": "VARCHAR(20) DEFAULT ''", "phone": "VARCHAR(40) DEFAULT ''", "staff_notes": "TEXT DEFAULT ''"},
         "halaqa_students": {

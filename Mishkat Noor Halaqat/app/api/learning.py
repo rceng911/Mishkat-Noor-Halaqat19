@@ -176,12 +176,7 @@ def learning_dashboard(mid:int,request:Request,db=Depends(get_db)):
     missing=[]
     for s in students:
         fields=[];account=db.get(User,s.user_id) if s.user_id else None
-        if not s.birth_date:fields.append('تاريخ الميلاد')
-        if not s.national_id:fields.append('رقم الهوية')
-        if not account or not account.active:fields.append('حساب متابع فعال')
-        if s.recipient_type=='guardian':
-            if not s.guardian_name:fields.append('اسم ولي الأمر')
-            if not s.guardian_phone:fields.append('جوال ولي الأمر')
+        if not account or not (account.username or '').strip():fields.append('لم يُصدر حساب باسم مستخدم')
         if fields:missing.append({'student_id':s.id,'name':s.full_name,'ring':db.get(Halaqa,s.halaqa_id).name,'fields':fields})
     teachers=db.scalars(select(User).where(User.mosque_id==mid,User.role==TEACHER_ROLE,User.active.is_(True))).all() if manager else []
     subs=db.scalars(select(SubstituteTeacher).where(SubstituteTeacher.halaqa_id.in_(rids),SubstituteTeacher.active.is_(True))).all() if manager else []

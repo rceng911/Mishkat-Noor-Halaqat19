@@ -116,9 +116,18 @@ def test_competition_review_awards_and_atomic_scope(network):
 
 def test_missing_data_and_full_delete_new_dependencies(network):
     n=network;o=n['owner'];rid=n['rings'][0];sid=n['ids'][0];url=B+f'/students/{sid}'
-    m=o.get(B+'/learning-dashboard').json()['missing'];assert next(x for x in m if x['student_id']==sid)['fields']==['تاريخ الميلاد','رقم الهوية','جوال ولي الأمر']
+    m=o.get(B+'/learning-dashboard').json()['missing'];assert sid not in [x['student_id'] for x in m]
     assert n['students'][0].get(B+'/learning-dashboard').json()['missing']==[]
-    assert o.put(url+'/profile',json={'full_name':'طالب مكتمل','guardian_name':'ولي الطالب','guardian_phone':'0500000000','birth_date':'2010-01-01','national_id':'1234567890'}).status_code==200
+    assert o.put(url+'/profile',json={'full_name':'طالب مكتمل','guardian_name':'ولي الطالب','guardian_phone':'0500000000'}).status_code==200
+    assert sid not in [x['student_id'] for x in o.get(B+'/learning-dashboard').json()['missing']]
+    from app.models import HalaqaStudent
+    # Optional demographics stay empty without making the file incomplete.
+    saved=o.get(url+'/file').json()['student']
+    assert saved['birth_date'] is None and not saved['national_id'] and not saved['school_grade']
+    with SessionLocal() as db:
+        student=db.get(HalaqaStudent,sid)
+        student.recipient_type='student';student.guardian_phone=''
+        db.commit()
     assert sid not in [x['student_id'] for x in o.get(B+'/learning-dashboard').json()['missing']]
     assert o.post(B+'/competitions',json={'halaqa_id':rid,'title':'مسابقة حذف','mode':'individual','unit':'نقطة','target':1,'start':str(today()),'end':str(today()),'student_ids':[sid]}).status_code==200
     assert o.put(B+f'/rings/{rid}/queue',json={'day':str(today()),'student_ids':[sid]}).status_code==200

@@ -1,0 +1,13 @@
+.student-row .children-line { display: block; margin-top: 5px; color: #0b6548; }
+.approval-form { margin-top: 12px; padding-top: 12px; border-top: 1px dashed #cdded3; }
+.approval-form .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.approval-form .actions button { flex: 1; }
+select[multiple] { min-height: 92px; }
+.family-dashboard { grid-template-columns: 1fr; }
+
+/* Follow-up and owner view controls */
+[hidden]{display:none!important}.notice{border-right:4px solid #b78634;padding:12px;margin:10px 0;background:#f5f8f7;color:#163d34;border-radius:8px}.notice.is-read{border-color:#cbd5d1;opacity:.8}.review-note{border-right:3px solid #c18a29;padding:10px}.reward-badge{display:inline-block;background:#eaf4ec;color:#1a583c;border:1px solid #b6d4be;border-radius:20px;padding:6px 12px;margin:4px}.points{font-size:1.7rem;font-weight:700}.toggle-label{display:flex!important;align-items:center;gap:10px}.toggle-label input{width:auto!important}.guardian-fields{display:grid;gap:12px}#portalViewBox{min-width:220px}#batchRows{display:grid;gap:10px}.halaqat-panel{min-width:0;overflow-wrap:anywhere}.halaqat-form select,.halaqat-form input{max-width:100%}details{margin-top:14px}summary{cursor:pointer;padding:8px 0}
+
+.development-fold{border-top:1px solid #d8e3de;padding-top:8px}.quran-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(115px,1fr));gap:8px;max-height:520px;overflow:auto;padding:6px}.quran-cell{display:flex;flex-direction:column;gap:6px;border:1px solid #cad8d2;padding:12px;border-radius:10px;background:#f4f7f6;color:#153d32}.state-memorized{background:#ddf3e4;border-color:#52936b}.state-consolidation{background:#fff1d6}.state-revision{background:#ffe2dc}.state-in_progress{background:#e0effa}.preserve-lines{white-space:pre-wrap}.message{padding:12px;background:#f3f6f4;border-radius:10px;margin:8px 0;color:#183d32}.message.mine{background:#e0f1ea}.message small{display:block}.audit-details{white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;overflow:auto;direction:rtl;font:inherit;font-size:.85rem}.criterion-row{display:grid;gap:8px;border:1px solid #d8e3de;border-radius:8px;padding:10px;margin:8px 0}textarea{font:inherit;width:100%;box-sizing:border-box;padding:10px;border:1px solid #c6d6d0;border-radius:8px;resize:vertical}#messageRows{max-height:500px;overflow:auto}.halaqat-card small{display:block}
+
+.learning-table{width:100%;border-collapse:collapse;font-size:.9rem}.learning-table th,.learning-table td{padding:.5rem;border-bottom:1px solid #d9e5e0;text-align:right}.learning-table th{background:#e6f1ec}

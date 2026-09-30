@@ -1,5 +1,0 @@
-{% extends "base.html" %}{% block content %}
-<link rel="stylesheet" href="/static/certificate.css?build=app">
-<main class="certificate"><p>{{organization}}</p><h1>{{certificate.title}}</h1><p>تُمنح هذه الشهادة للطالب</p><h2>{{student.full_name}}</h2><p>{{certificate.achievement}}</p><div class="certificate-footer"><p>أصدرها: {{issuer}}</p><p>التاريخ: {{certificate.issued_on}}</p><p>رقم الشهادة: {{certificate.id}}</p></div></main>
-<nav class="print-actions"><button id="printCertificate">طباعة أو حفظ PDF</button><a href="/halaqat">العودة للحلقات</a></nav><script src="/static/print.js"></script>
-{% endblock %}

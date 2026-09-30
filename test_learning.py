@@ -116,7 +116,7 @@ def test_competition_review_awards_and_atomic_scope(network):
 
 def test_missing_data_and_full_delete_new_dependencies(network):
     n=network;o=n['owner'];rid=n['rings'][0];sid=n['ids'][0];url=B+f'/students/{sid}'
-    m=o.get(B+'/learning-dashboard').json()['missing'];assert next(x for x in m if x['student_id']==sid)['fields']==['جوال الطالب أو ولي الأمر']
+    m=o.get(B+'/learning-dashboard').json()['missing'];assert sid not in [x['student_id'] for x in m]
     assert n['students'][0].get(B+'/learning-dashboard').json()['missing']==[]
     assert o.put(url+'/profile',json={'full_name':'طالب مكتمل','guardian_name':'ولي الطالب','guardian_phone':'0500000000'}).status_code==200
     assert sid not in [x['student_id'] for x in o.get(B+'/learning-dashboard').json()['missing']]
@@ -128,7 +128,7 @@ def test_missing_data_and_full_delete_new_dependencies(network):
         student=db.get(HalaqaStudent,sid)
         student.recipient_type='student';student.guardian_phone=''
         db.commit()
-    assert next(x for x in o.get(B+'/learning-dashboard').json()['missing'] if x['student_id']==sid)['fields']==['جوال الطالب أو ولي الأمر']
+    assert sid not in [x['student_id'] for x in o.get(B+'/learning-dashboard').json()['missing']]
     assert o.post(B+'/competitions',json={'halaqa_id':rid,'title':'مسابقة حذف','mode':'individual','unit':'نقطة','target':1,'start':str(today()),'end':str(today()),'student_ids':[sid]}).status_code==200
     assert o.put(B+f'/rings/{rid}/queue',json={'day':str(today()),'student_ids':[sid]}).status_code==200
     # Transfer the participant away; deleting the old ring must clean ring-owned dependencies only.

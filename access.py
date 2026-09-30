@@ -1,14 +1,12 @@
-"""Role-aware dashboards, owner user administration, and approval workflow.
+"""Owner account tools and approval workflow, designed to keep the v20.4 UI layout.
 
-This module is additive: it reuses the existing authentication/session boundary and
-circle models so current features continue to work unchanged.
+The stored roles remain backwards compatible. Student/guardian continue to share
+``halaqa_student`` and are distinguished by ``account_type``.
 """
 from __future__ import annotations
 
 from datetime import datetime
 import json
-import secrets
-import string
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -27,10 +25,9 @@ from app.api.halaqat import (
     _temporary_password,
     _unique_email,
 )
-from app.api.routes import audit, audit_change, session
+from app.api.routes import audit, audit_change
 from app.db.session import get_db
 from app.models import (
-    AuditLog,
     AuthSession,
     Halaqa,
     HalaqaChangeRequest,
@@ -40,192 +37,154 @@ from app.models import (
     User,
 )
 from app.services.auth import hash_password
-from app.services.password_policy import validate_password
 
-router = APIRouter(prefix="/api/access", tags=["role-access"])
+router = APIRouter(prefix="/api/access", tags=["access"])
 
-ROLE_KEYS = {
-    "supervisor": SUPERVISOR_ROLE,
-    "teacher": TEACHER_ROLE,
-    "student": STUDENT_ROLE,
-    "guardian": STUDENT_ROLE,
-}
 ROLE_LABELS = {
     "owner": "المدير العام",
-    "supervisor": "مشرف الفرع",
-    "teacher": "المعلم",
+    SUPERVISOR_ROLE: "مشرف الفرع",
+    TEACHER_ROLE: "المعلم",
     "guardian": "ولي الأمر",
     "student": "الطالب",
 }
+STATE_LABELS = {
+    "pending": "بانتظار موافقة المدير",
+    "approved": "تم الاعتماد",
+    "rejected": "مرفوض",
+    "cancelled": "ملغي",
+}
 ACTION_LABELS = {
-    "student_transfer": "نقل طالب بين الحلقات",
+    "student_transfer": "نقل طالب إلى حلقة أخرى",
+    "student_archive": "أرشفة / استعادة طالب",
     "ring_update": "تعديل بيانات حلقة",
     "teacher_assignment": "تغيير معلمي الحلقة",
-    "deactivate_user": "تعطيل حساب مستخدم",
+    "deactivate_user": "تعطيل / تفعيل حساب",
 }
 
 
-def portal_kind(user) -> str:
-    """Return the UI role without changing the stored, backwards-compatible role."""
+def _portal_role(user: User) -> str:
     if user.role == "owner":
         return "owner"
     if user.role == SUPERVISOR_ROLE:
-        return "supervisor"
+        return SUPERVISOR_ROLE
     if user.role == TEACHER_ROLE:
-        return "teacher"
+        return TEACHER_ROLE
     if user.role == STUDENT_ROLE:
-        return "guardian" if (user.account_type or "") == "guardian" else "student"
-    return "unknown"
+        return "guardian" if user.account_type == "guardian" else "student"
+    return user.role
 
 
-def _actual_user(request: Request, db):
-    s = session(request)
-    user = db.get(User, s.user_id) if s else None
-    if not user or not user.active:
-        raise HTTPException(401, "سجل الدخول أولًا")
-    if user.force_password_change:
-        raise HTTPException(403, "غيّر الرمز المؤقت أولًا")
-    return user
+def _role_label(user: User) -> str:
+    return ROLE_LABELS.get(_portal_role(user), user.role)
 
 
-def _display_role(user: User) -> str:
-    return ROLE_LABELS.get(portal_kind(user), user.role)
+def _safe_json(value: str) -> dict:
+    try:
+        return json.loads(value or "{}")
+    except Exception:
+        return {}
 
 
-def _user_item(user: User, db) -> dict:
-    children = []
-    if user.role == STUDENT_ROLE and (user.account_type or "") == "guardian":
-        children = [
-            {"name": s.full_name, "halaqa_id": s.halaqa_id}
-            for s in db.scalars(
-                select(HalaqaStudent)
-                .where(HalaqaStudent.user_id == user.id, HalaqaStudent.active.is_(True))
-                .order_by(HalaqaStudent.full_name)
-            ).all()
+def _ring_name(db, rid):
+    row = db.get(Halaqa, rid) if rid else None
+    return row.name if row else "—"
+
+
+def _student_name(db, sid):
+    row = db.get(HalaqaStudent, sid) if sid else None
+    return row.full_name if row else "—"
+
+
+def _user_name(db, uid):
+    row = db.get(User, uid) if uid else None
+    return row.full_name if row else "—"
+
+
+def _request_item(row: HalaqaChangeRequest, db) -> dict:
+    before = _safe_json(row.before_json)
+    after = _safe_json(row.after_json)
+    details = []
+    if row.action_type == "student_transfer":
+        details = [
+            f"الطالب: {_student_name(db, row.target_id)}",
+            f"من: {_ring_name(db, before.get('halaqa_id'))}",
+            f"إلى: {_ring_name(db, after.get('halaqa_id'))}",
         ]
+    elif row.action_type == "student_archive":
+        details = [
+            f"الطالب: {_student_name(db, row.target_id)}",
+            "الحالة المطلوبة: " + ("فعال" if after.get("active") else "مؤرشف"),
+        ]
+    elif row.action_type == "ring_update":
+        details = [
+            f"الحلقة: {_ring_name(db, row.target_id)}",
+            f"الاسم قبل: {before.get('name', '—')}",
+            f"الاسم بعد: {after.get('name', '—')}",
+            f"الموعد بعد: {after.get('schedule', '') or '—'}",
+        ]
+    elif row.action_type == "teacher_assignment":
+        old = [_user_name(db, x) for x in before.get("teacher_ids", [])]
+        new = [_user_name(db, x) for x in after.get("teacher_ids", [])]
+        details = [
+            f"الحلقة: {_ring_name(db, row.target_id)}",
+            "المعلمون قبل: " + ("، ".join(old) or "لا يوجد"),
+            "المعلمون بعد: " + ("، ".join(new) or "لا يوجد"),
+        ]
+    elif row.action_type == "deactivate_user":
+        details = [
+            f"الحساب: {_user_name(db, row.target_id)}",
+            "الحالة المطلوبة: " + ("فعال" if after.get("active") else "معطل"),
+        ]
+    requester = db.get(User, row.requested_by)
+    reviewer = db.get(User, row.reviewed_by) if row.reviewed_by else None
     return {
-        "id": user.id,
-        "name": user.full_name,
-        "username": user.username,
-        "email": "" if user.email.endswith("@accounts.invalid") else user.email,
-        "active": bool(user.active),
-        "role": user.role,
-        "portal_role": portal_kind(user),
-        "role_label": _display_role(user),
-        "children": children,
+        "id": row.id,
+        "action_type": row.action_type,
+        "action_label": ACTION_LABELS.get(row.action_type, row.action_type),
+        "status": row.status,
+        "status_label": STATE_LABELS.get(row.status, row.status),
+        "reason": row.reason,
+        "details": details,
+        "requested_by": requester.full_name if requester else "—",
+        "reviewed_by": reviewer.full_name if reviewer else "",
+        "review_note": row.review_note,
+        "created_at": row.created_at.isoformat() + "Z",
+        "reviewed_at": row.reviewed_at.isoformat() + "Z" if row.reviewed_at else "",
     }
 
 
-def _scoped_ring_ids(user: User, mid: int, db) -> set[int]:
+def _scope_ring_ids(user, mid: int, db) -> set[int]:
     return set(_ring_ids_for(user, mid, db))
 
 
-def _ring_in_scope(user: User, mid: int, rid: int, db) -> Halaqa:
-    ring = db.get(Halaqa, rid)
-    if not ring or ring.mosque_id != mid or not ring.active:
-        raise HTTPException(404, "الحلقة غير موجودة")
-    if user.role != "owner" and rid not in _scoped_ring_ids(user, mid, db):
-        raise HTTPException(403, "الحلقة خارج نطاق صلاحيتك")
-    return ring
-
-
-def _student_in_scope(user: User, mid: int, sid: int, db) -> HalaqaStudent:
+def _student_in_scope(user, mid: int, sid: int, db) -> HalaqaStudent:
     student = db.get(HalaqaStudent, sid)
-    if not student or not student.active:
+    if not student:
         raise HTTPException(404, "الطالب غير موجود")
     ring = db.get(Halaqa, student.halaqa_id)
     if not ring or ring.mosque_id != mid:
         raise HTTPException(404, "الطالب غير موجود في هذا الفرع")
-    if user.role != "owner" and student.halaqa_id not in _scoped_ring_ids(user, mid, db):
+    if user.role != "owner" and student.halaqa_id not in _scope_ring_ids(user, mid, db):
         raise HTTPException(403, "الطالب خارج نطاق صلاحيتك")
     return student
 
 
-def _email_for_new_user(db, email: str, prefix: str) -> str:
-    email = (email or "").strip().lower()
-    if email:
-        if "@" not in email or " " in email:
-            raise HTTPException(422, "البريد الإلكتروني غير صالح")
-        if db.scalar(select(User.id).where(User.email == email)):
-            raise HTTPException(409, "البريد الإلكتروني مستخدم مسبقًا")
-        return email
-    return _unique_email(db, "", prefix, secrets.randbelow(900000000) + 100000000)
-
-
-@router.get("/me")
-def me(request: Request, db=Depends(get_db)):
-    user = _actual_user(request, db)
-    kind = portal_kind(user)
-    if kind == "unknown":
-        raise HTTPException(403, "هذا الحساب لا يملك واجهة حلقات")
-    return {
-        "ok": True,
-        "id": user.id,
-        "name": user.full_name,
-        "portal_role": kind,
-        "role_label": ROLE_LABELS[kind],
-        "account_type": user.account_type or "",
-        "dashboard": f"/dashboard/{kind}",
-        "mosque_id": user.mosque_id,
-    }
-
-
-@router.get("/mosques/{mid}/directory")
-def directory(mid: int, request: Request, db=Depends(get_db)):
-    user = _require(request, db, mid, PORTAL_ROLES)
-    ring_ids = _scoped_ring_ids(user, mid, db)
-    rings = [r for r in db.scalars(select(Halaqa).where(Halaqa.id.in_(ring_ids)).order_by(Halaqa.name)).all()] if ring_ids else []
-    if user.role == STUDENT_ROLE:
-        students = db.scalars(
-            select(HalaqaStudent)
-            .where(
-                HalaqaStudent.user_id == user.id,
-                HalaqaStudent.halaqa_id.in_(ring_ids),
-                HalaqaStudent.active.is_(True),
-            )
-            .order_by(HalaqaStudent.full_name)
-        ).all() if ring_ids else []
-    else:
-        students = db.scalars(
-            select(HalaqaStudent)
-            .where(HalaqaStudent.halaqa_id.in_(ring_ids), HalaqaStudent.active.is_(True))
-            .order_by(HalaqaStudent.full_name)
-        ).all() if ring_ids else []
-
-    teacher_ids = set()
-    supervisor_ids = set()
-    for rid in ring_ids:
-        teacher_ids.update(db.scalars(select(HalaqaTeacher.user_id).where(HalaqaTeacher.halaqa_id == rid, HalaqaTeacher.active.is_(True))).all())
-        supervisor_ids.update(db.scalars(select(HalaqaSupervisor.user_id).where(HalaqaSupervisor.halaqa_id == rid, HalaqaSupervisor.active.is_(True))).all())
-    if user.role in ("owner", SUPERVISOR_ROLE):
-        teacher_ids.update(db.scalars(select(User.id).where(User.mosque_id == mid, User.role == TEACHER_ROLE, User.active.is_(True))).all())
-        supervisor_ids.update(db.scalars(select(User.id).where(User.mosque_id == mid, User.role == SUPERVISOR_ROLE, User.active.is_(True))).all())
-    teachers = [u for u in (db.get(User, uid) for uid in sorted(teacher_ids)) if u and u.active]
-    supervisors = [u for u in (db.get(User, uid) for uid in sorted(supervisor_ids)) if u and u.active]
-    guardians = db.scalars(select(User).where(User.mosque_id == mid, User.role == STUDENT_ROLE, User.account_type == "guardian", User.active.is_(True)).order_by(User.full_name)).all() if user.role in ("owner", SUPERVISOR_ROLE) else []
-
-    targets = []
-    if user.role in ("owner", SUPERVISOR_ROLE):
-        q = select(User).where(User.mosque_id == mid, User.role != "owner").order_by(User.full_name)
-        targets = [{"id": u.id, "name": u.full_name, "role_label": _display_role(u), "active": bool(u.active)} for u in db.scalars(q).all()]
-
-    return {
-        "rings": [{"id": r.id, "name": r.name, "schedule": r.schedule} for r in rings],
-        "students": [{"id": s.id, "name": s.full_name, "halaqa_id": s.halaqa_id} for s in students],
-        "teachers": [{"id": u.id, "name": u.full_name} for u in teachers],
-        "supervisors": [{"id": u.id, "name": u.full_name} for u in supervisors],
-        "guardians": [{"id": u.id, "name": u.full_name} for u in guardians],
-        "deactivation_targets": targets,
-    }
+def _ring_in_scope(user, mid: int, rid: int, db) -> Halaqa:
+    ring = db.get(Halaqa, rid)
+    if not ring or ring.mosque_id != mid:
+        raise HTTPException(404, "الحلقة غير موجودة")
+    if user.role != "owner" and rid not in _scope_ring_ids(user, mid, db):
+        raise HTTPException(403, "الحلقة خارج نطاق صلاحيتك")
+    return ring
 
 
 class UserCreate(Input):
     full_name: str = Field(min_length=2, max_length=180)
     username: str = Field(min_length=3, max_length=30)
-    email: str = Field("", max_length=200)
     role: Literal["supervisor", "teacher", "student", "guardian"]
+    email: str = Field("", max_length=200)
     halaqa_id: int | None = Field(None, gt=0)
-    temporary_password: str = Field("", max_length=128)
+    student_id: int | None = Field(None, gt=0)
 
 
 class UserEdit(Input):
@@ -235,140 +194,12 @@ class UserEdit(Input):
     active: bool = True
 
 
-@router.get("/mosques/{mid}/users")
-def users(mid: int, request: Request, db=Depends(get_db)):
-    _require(request, db, mid, {"owner"})
-    rows = db.scalars(select(User).where(User.mosque_id == mid, User.role.in_(PORTAL_ROLES)).order_by(User.full_name)).all()
-    return {"users": [_user_item(u, db) for u in rows]}
-
-
-AUDIT_LABELS = {
-    "owner_setup": "إعداد المدير العام",
-    "login": "تسجيل دخول",
-    "password_changed": "تغيير كلمة المرور",
-    "user_created_by_owner": "إنشاء حساب من الإدارة",
-    "user_profile_edited": "تعديل حساب من الإدارة",
-    "halaqa_user_password_reset": "إصدار رمز مؤقت",
-    "change_request_created": "رفع طلب تعديل",
-    "change_request_approved": "اعتماد طلب تعديل",
-    "change_request_rejected": "رفض طلب تعديل",
-    "change_request_cancelled": "إلغاء طلب تعديل",
-    "student_transferred_after_approval": "نقل طالب بعد الاعتماد",
-    "ring_updated_after_approval": "تعديل حلقة بعد الاعتماد",
-    "teachers_changed_after_approval": "تغيير معلمي حلقة بعد الاعتماد",
-    "user_deactivated_after_approval": "تعطيل حساب بعد الاعتماد",
-}
-
-
-@router.get("/mosques/{mid}/audit")
-def audit_log(mid: int, request: Request, db=Depends(get_db)):
-    _require(request, db, mid, {"owner"})
-    rows = db.scalars(
-        select(AuditLog)
-        .where(AuditLog.mosque_id == mid)
-        .order_by(AuditLog.id.desc())
-        .limit(200)
-    ).all()
-    actors = {
-        uid: db.get(User, uid)
-        for uid in {row.user_id for row in rows if row.user_id}
-    }
-    return {
-        "items": [
-            {
-                "id": row.id,
-                "actor": actors.get(row.user_id).full_name if row.user_id and actors.get(row.user_id) else "النظام",
-                "action": row.action,
-                "action_label": AUDIT_LABELS.get(row.action, row.action.replace("_", " ")),
-                "created_at": row.created_at.isoformat() + "Z",
-            }
-            for row in rows
-        ]
-    }
-
-
-@router.post("/mosques/{mid}/users")
-def create_user(mid: int, data: UserCreate, request: Request, db=Depends(get_db)):
-    owner = _require(request, db, mid, {"owner"})
-    username = _clean_username(data.username, required=True)
-    if db.scalar(select(User.id).where(User.username == username)):
-        raise HTTPException(409, "اسم المستخدم مستخدم مسبقًا")
-    stored_role = ROLE_KEYS[data.role]
-    account_type = data.role if data.role in ("student", "guardian") else ""
-    if data.role in ("teacher", "student") and not data.halaqa_id:
-        raise HTTPException(422, "اختر الحلقة لهذا الحساب")
-    ring = None
-    if data.halaqa_id:
-        ring = _ring_in_scope(owner, mid, data.halaqa_id, db)
-    password = data.temporary_password or _temporary_password()
-    valid, error = validate_password(password)
-    if not valid or len(password) > 128:
-        raise HTTPException(422, error or "كلمة المرور المؤقتة غير صالحة")
-    email = _email_for_new_user(db, data.email, data.role)
-    user = User(
-        email=email,
-        username=username,
-        full_name=data.full_name.strip(),
-        password_hash=hash_password(password),
-        role=stored_role,
-        account_type=account_type,
-        mosque_id=mid,
-        active=True,
-        force_password_change=True,
-    )
-    db.add(user)
-    db.flush()
-    if data.role == "teacher":
-        db.add(HalaqaTeacher(halaqa_id=ring.id, user_id=user.id, assigned_by=owner.id, active=True))
-    elif data.role == "student":
-        db.add(HalaqaStudent(halaqa_id=ring.id, user_id=user.id, full_name=user.full_name, recipient_type="student", active=True))
-    audit(db, owner.id, mid, "user_created_by_owner", json.dumps({"user_id": user.id, "role": data.role}, ensure_ascii=False))
-    db.commit()
-    return {
-        "ok": True,
-        "user": _user_item(user, db),
-        "temporary_password": password,
-        "message": "احفظ كلمة المرور المؤقتة؛ يجب تغييرها عند أول دخول",
-    }
-
-
-@router.put("/mosques/{mid}/users/{uid}")
-def edit_user(mid: int, uid: int, data: UserEdit, request: Request, db=Depends(get_db)):
-    owner = _require(request, db, mid, {"owner"})
-    user = db.get(User, uid)
-    if not user or user.mosque_id != mid or user.role not in PORTAL_ROLES:
-        raise HTTPException(404, "المستخدم غير موجود")
-    username = _clean_username(data.username, required=True)
-    if db.scalar(select(User.id).where(User.username == username, User.id != uid)):
-        raise HTTPException(409, "اسم المستخدم مستخدم مسبقًا")
-    email = (data.email or "").strip().lower()
-    if email and ("@" not in email or " " in email):
-        raise HTTPException(422, "البريد الإلكتروني غير صالح")
-    if email and db.scalar(select(User.id).where(User.email == email, User.id != uid)):
-        raise HTTPException(409, "البريد الإلكتروني مستخدم مسبقًا")
-    before = _user_item(user, db)
-    username_changed = username != user.username
-    active_changed = bool(data.active) != bool(user.active)
-    user.full_name = data.full_name.strip()
-    user.username = username
-    user.active = bool(data.active)
-    if email:
-        user.email = email
-    elif not user.email.endswith("@accounts.invalid"):
-        user.email = _email_for_new_user(db, "", portal_kind(user))
-    if username_changed or active_changed:
-        db.execute(delete(AuthSession).where(AuthSession.user_id == uid))
-    after = _user_item(user, db)
-    audit_change(db, owner.id, mid, "user_profile_edited", uid, before, after)
-    db.commit()
-    return {"ok": True, "user": after}
-
-
-class ChangeRequestInput(Input):
-    action_type: Literal["student_transfer", "ring_update", "teacher_assignment", "deactivate_user"]
-    reason: str = Field(min_length=3, max_length=1500)
+class ChangeRequest(Input):
+    action_type: Literal["student_transfer", "student_archive", "ring_update", "teacher_assignment", "deactivate_user"]
+    reason: str = Field(min_length=2, max_length=1000)
     student_id: int | None = Field(None, gt=0)
     target_halaqa_id: int | None = Field(None, gt=0)
+    active: bool | None = None
     ring_id: int | None = Field(None, gt=0)
     name: str = Field("", max_length=180)
     schedule: str = Field("", max_length=500)
@@ -376,156 +207,198 @@ class ChangeRequestInput(Input):
     user_id: int | None = Field(None, gt=0)
 
 
-class ReviewInput(Input):
-    note: str = Field("", max_length=1500)
+class Review(Input):
+    note: str = Field("", max_length=1000)
 
 
-def _safe_json(value: str) -> dict:
-    try:
-        loaded = json.loads(value or "{}")
-        return loaded if isinstance(loaded, dict) else {}
-    except Exception:
-        return {}
-
-
-def _teacher_names(ids: list[int], db) -> str:
-    names = [u.full_name for u in (db.get(User, x) for x in ids) if u]
-    return "، ".join(names) or "بدون معلم"
-
-
-def _request_labels(row: HalaqaChangeRequest, db) -> tuple[str, str, str]:
-    before, after = _safe_json(row.before_json), _safe_json(row.after_json)
-    target = ""
-    before_label = ""
-    after_label = ""
-    if row.action_type == "student_transfer":
-        student = db.get(HalaqaStudent, row.target_id)
-        target = student.full_name if student else "طالب"
-        before_ring = db.get(Halaqa, before.get("halaqa_id")) if before.get("halaqa_id") else None
-        after_ring = db.get(Halaqa, after.get("halaqa_id")) if after.get("halaqa_id") else None
-        before_label = before_ring.name if before_ring else "—"
-        after_label = after_ring.name if after_ring else "—"
-    elif row.action_type == "ring_update":
-        ring = db.get(Halaqa, row.target_id)
-        target = ring.name if ring else before.get("name", "حلقة")
-        before_label = f"{before.get('name','')} · {before.get('schedule','') or 'بدون جدول'}"
-        after_label = f"{after.get('name','')} · {after.get('schedule','') or 'بدون جدول'}"
-    elif row.action_type == "teacher_assignment":
-        ring = db.get(Halaqa, row.target_id)
-        target = ring.name if ring else "حلقة"
-        before_label = _teacher_names(before.get("teacher_ids", []), db)
-        after_label = _teacher_names(after.get("teacher_ids", []), db)
-    elif row.action_type == "deactivate_user":
-        target_user = db.get(User, row.target_id)
-        target = target_user.full_name if target_user else "مستخدم"
-        before_label = "نشط" if before.get("active", True) else "معطل"
-        after_label = "معطل"
-    return target, before_label, after_label
-
-
-def _change_item(row: HalaqaChangeRequest, db) -> dict:
-    requester = db.get(User, row.requested_by)
-    reviewer = db.get(User, row.reviewed_by) if row.reviewed_by else None
-    target, before_label, after_label = _request_labels(row, db)
-    return {
-        "id": row.id,
-        "action_type": row.action_type,
-        "action_label": ACTION_LABELS.get(row.action_type, row.action_type),
-        "target": target,
-        "before_label": before_label,
-        "after_label": after_label,
-        "reason": row.reason,
-        "status": row.status,
-        "requester": requester.full_name if requester else "—",
-        "reviewer": reviewer.full_name if reviewer else "",
-        "review_note": row.review_note,
-        "created_at": row.created_at.isoformat() + "Z",
-        "reviewed_at": row.reviewed_at.isoformat() + "Z" if row.reviewed_at else None,
-    }
-
-
-def _active_teacher_ids(db, rid: int) -> list[int]:
-    return sorted(db.scalars(select(HalaqaTeacher.user_id).where(HalaqaTeacher.halaqa_id == rid, HalaqaTeacher.active.is_(True))).all())
-
-
-@router.get("/mosques/{mid}/change-requests")
-def change_requests(mid: int, request: Request, db=Depends(get_db)):
+@router.get("/mosques/{mid}/overview")
+def overview(mid: int, request: Request, db=Depends(get_db)):
     user = _require(request, db, mid, {SUPERVISOR_ROLE})
+    if user.role not in ("owner", SUPERVISOR_ROLE):
+        raise HTTPException(403, "هذه الأدوات للإدارة فقط")
+    ring_ids = _scope_ring_ids(user, mid, db)
+    rings = db.scalars(select(Halaqa).where(Halaqa.id.in_(ring_ids)).order_by(Halaqa.name)).all() if ring_ids else []
+    students = db.scalars(select(HalaqaStudent).where(HalaqaStudent.halaqa_id.in_(ring_ids), HalaqaStudent.active.is_(True)).order_by(HalaqaStudent.full_name)).all() if ring_ids else []
+    teachers = db.scalars(select(User).where(User.mosque_id == mid, User.role == TEACHER_ROLE, User.active.is_(True)).order_by(User.full_name)).all()
+    users = []
+    unlinked = []
+    if user.role == "owner":
+        users = db.scalars(select(User).where(User.mosque_id == mid, User.role.in_(PORTAL_ROLES)).order_by(User.full_name)).all()
+        unlinked = db.scalars(
+            select(HalaqaStudent)
+            .join(Halaqa, Halaqa.id == HalaqaStudent.halaqa_id)
+            .where(Halaqa.mosque_id == mid, HalaqaStudent.user_id.is_(None), HalaqaStudent.active.is_(True))
+            .order_by(HalaqaStudent.full_name)
+        ).all()
     q = select(HalaqaChangeRequest).where(HalaqaChangeRequest.mosque_id == mid)
     if user.role != "owner":
         q = q.where(HalaqaChangeRequest.requested_by == user.id)
-    rows = db.scalars(q.order_by(HalaqaChangeRequest.id.desc()).limit(100)).all()
-    return {"requests": [_change_item(row, db) for row in rows]}
+    changes = db.scalars(q.order_by(HalaqaChangeRequest.id.desc()).limit(100)).all()
+    return {
+        "rings": [{"id": r.id, "name": r.name, "schedule": r.schedule} for r in rings],
+        "students": [{"id": s.id, "name": s.full_name, "halaqa_id": s.halaqa_id} for s in students],
+        "teachers": [{"id": u.id, "name": u.full_name} for u in teachers],
+        "unlinked_students": [{"id": s.id, "name": s.full_name, "halaqa_id": s.halaqa_id} for s in unlinked],
+        "users": [{
+            "id": u.id,
+            "name": u.full_name,
+            "username": u.username,
+            "email": "" if u.email.endswith("@accounts.invalid") else u.email,
+            "active": bool(u.active),
+            "role_label": _role_label(u),
+        } for u in users],
+        "change_requests": [_request_item(x, db) for x in changes],
+        "pending_count": sum(1 for x in changes if x.status == "pending"),
+    }
+
+
+@router.post("/mosques/{mid}/users")
+def create_user(mid: int, data: UserCreate, request: Request, db=Depends(get_db)):
+    owner = _require(request, db, mid, {"owner"})
+    if owner.role != "owner":
+        raise HTTPException(403, "إصدار الحسابات من صلاحية المدير العام")
+    username = _clean_username(data.username, required=True)
+    if db.scalar(select(User.id).where(User.username == username)):
+        raise HTTPException(409, "اسم المستخدم مستخدم مسبقًا")
+    email = data.email.strip().lower()
+    if email:
+        if "@" not in email or " " in email:
+            raise HTTPException(422, "البريد الإلكتروني غير صالح")
+        if db.scalar(select(User.id).where(User.email == email)):
+            raise HTTPException(409, "البريد الإلكتروني مستخدم مسبقًا")
+    else:
+        email = _unique_email(db, "", data.role, int(datetime.utcnow().timestamp() * 1000) % 2_000_000_000)
+    role = {"supervisor": SUPERVISOR_ROLE, "teacher": TEACHER_ROLE, "student": STUDENT_ROLE, "guardian": STUDENT_ROLE}[data.role]
+    temp = _temporary_password()
+    user = User(
+        email=email,
+        username=username,
+        password_hash=hash_password(temp),
+        full_name=data.full_name.strip(),
+        role=role,
+        account_type=data.role if data.role in ("student", "guardian") else "",
+        mosque_id=mid,
+        active=True,
+        force_password_change=True,
+    )
+    db.add(user); db.flush()
+    if data.halaqa_id:
+        ring = db.get(Halaqa, data.halaqa_id)
+        if not ring or ring.mosque_id != mid or not ring.active:
+            raise HTTPException(422, "الحلقة المختارة غير صالحة")
+        if data.role == "teacher":
+            db.add(HalaqaTeacher(halaqa_id=ring.id, user_id=user.id, assigned_by=owner.id, active=True))
+        elif data.role == "supervisor":
+            db.add(HalaqaSupervisor(halaqa_id=ring.id, user_id=user.id, assigned_by=owner.id, active=True))
+    if data.student_id:
+        if data.role not in ("student", "guardian"):
+            raise HTTPException(422, "ربط ملف طالب متاح لحساب الطالب أو ولي الأمر")
+        student = _student_in_scope(owner, mid, data.student_id, db)
+        if student.user_id:
+            raise HTTPException(409, "ملف الطالب مرتبط بحساب مسبقًا")
+        if data.role == "student" and db.scalar(select(HalaqaStudent.id).where(HalaqaStudent.user_id == user.id)):
+            raise HTTPException(409, "حساب الطالب يرتبط بملف طالب واحد")
+        student.user_id = user.id
+        student.recipient_type = data.role
+        if data.role == "guardian":
+            student.guardian_name = user.full_name
+    audit(db, owner.id, mid, "account_issued", json.dumps({"user_id": user.id, "role": data.role}, ensure_ascii=False))
+    db.commit()
+    return {"ok": True, "user": {"id": user.id, "name": user.full_name, "username": user.username, "role_label": _role_label(user)}, "temporary_password": temp}
+
+
+@router.put("/mosques/{mid}/users/{uid}")
+def edit_user(mid: int, uid: int, data: UserEdit, request: Request, db=Depends(get_db)):
+    owner = _require(request, db, mid, {"owner"})
+    if owner.role != "owner":
+        raise HTTPException(403, "إدارة الحسابات من صلاحية المدير العام")
+    target = db.get(User, uid)
+    if not target or target.mosque_id != mid or target.role == "owner" or target.role not in PORTAL_ROLES:
+        raise HTTPException(404, "الحساب غير موجود")
+    username = _clean_username(data.username, required=True)
+    if db.scalar(select(User.id).where(User.username == username, User.id != uid)):
+        raise HTTPException(409, "اسم المستخدم مستخدم مسبقًا")
+    email = data.email.strip().lower()
+    if email:
+        if "@" not in email or " " in email:
+            raise HTTPException(422, "البريد الإلكتروني غير صالح")
+        if db.scalar(select(User.id).where(User.email == email, User.id != uid)):
+            raise HTTPException(409, "البريد الإلكتروني مستخدم مسبقًا")
+    elif not target.email.endswith("@accounts.invalid"):
+        email = _unique_email(db, "", "user", uid)
+    else:
+        email = target.email
+    before = {"full_name": target.full_name, "username": target.username, "email": target.email, "active": bool(target.active)}
+    if username != target.username or (target.active and not data.active):
+        db.execute(delete(AuthSession).where(AuthSession.user_id == uid))
+    target.full_name = data.full_name.strip()
+    target.username = username
+    target.email = email
+    target.active = data.active
+    audit_change(db, owner.id, mid, "user_admin_edited", uid, before, {"full_name": target.full_name, "username": target.username, "email": target.email, "active": bool(target.active)})
+    db.commit()
+    return {"ok": True, "user": {"id": target.id, "name": target.full_name, "username": target.username, "active": bool(target.active)}}
 
 
 @router.post("/mosques/{mid}/change-requests")
-def create_change_request(mid: int, data: ChangeRequestInput, request: Request, db=Depends(get_db)):
-    supervisor = _require(request, db, mid, {SUPERVISOR_ROLE})
-    if supervisor.role == "owner":
-        raise HTTPException(422, "المدير العام ينفذ التعديل من أدوات الإدارة مباشرة")
-    before: dict
-    after: dict
-    target_type: str
-    target_id: int
-
+def create_change_request(mid: int, data: ChangeRequest, request: Request, db=Depends(get_db)):
+    user = _require(request, db, mid, {SUPERVISOR_ROLE})
+    if user.role != SUPERVISOR_ROLE:
+        raise HTTPException(422, "طلبات الموافقة مخصصة لتعديلات مشرف الفرع")
+    before = {}
+    after = {}
+    target_type = ""
+    target_id = None
     if data.action_type == "student_transfer":
         if not data.student_id or not data.target_halaqa_id:
             raise HTTPException(422, "اختر الطالب والحلقة الجديدة")
-        student = _student_in_scope(supervisor, mid, data.student_id, db)
-        target_ring = _ring_in_scope(supervisor, mid, data.target_halaqa_id, db)
-        if student.halaqa_id == target_ring.id:
-            raise HTTPException(422, "الطالب موجود بالفعل في هذه الحلقة")
+        student = _student_in_scope(user, mid, data.student_id, db)
+        _ring_in_scope(user, mid, data.target_halaqa_id, db)
+        if student.halaqa_id == data.target_halaqa_id:
+            raise HTTPException(409, "الطالب موجود أصلًا في هذه الحلقة")
         before = {"halaqa_id": student.halaqa_id}
-        after = {"halaqa_id": target_ring.id}
+        after = {"halaqa_id": data.target_halaqa_id}
+        target_type, target_id = "student", student.id
+    elif data.action_type == "student_archive":
+        if not data.student_id or data.active is None:
+            raise HTTPException(422, "حدد الطالب والحالة المطلوبة")
+        student = _student_in_scope(user, mid, data.student_id, db)
+        before = {"active": bool(student.active)}
+        after = {"active": bool(data.active)}
         target_type, target_id = "student", student.id
     elif data.action_type == "ring_update":
-        if not data.ring_id or not data.name.strip():
+        if not data.ring_id or len(data.name.strip()) < 2:
             raise HTTPException(422, "اختر الحلقة وأدخل الاسم")
-        ring = _ring_in_scope(supervisor, mid, data.ring_id, db)
-        duplicate = db.scalar(select(Halaqa.id).where(Halaqa.mosque_id == mid, Halaqa.name == data.name.strip(), Halaqa.id != ring.id))
-        if duplicate:
-            raise HTTPException(409, "اسم الحلقة مستخدم")
+        ring = _ring_in_scope(user, mid, data.ring_id, db)
         before = {"name": ring.name, "schedule": ring.schedule}
         after = {"name": data.name.strip(), "schedule": data.schedule.strip()}
         target_type, target_id = "ring", ring.id
     elif data.action_type == "teacher_assignment":
         if not data.ring_id:
             raise HTTPException(422, "اختر الحلقة")
-        ring = _ring_in_scope(supervisor, mid, data.ring_id, db)
-        ids = sorted(set(data.teacher_ids))
-        for uid in ids:
-            teacher = db.get(User, uid)
-            if not teacher or not teacher.active or teacher.mosque_id != mid or teacher.role != TEACHER_ROLE:
-                raise HTTPException(422, "اختر معلمين فعالين من الفرع")
-        before = {"teacher_ids": _active_teacher_ids(db, ring.id)}
-        after = {"teacher_ids": ids}
+        ring = _ring_in_scope(user, mid, data.ring_id, db)
+        if len(data.teacher_ids) != len(set(data.teacher_ids)):
+            raise HTTPException(422, "يوجد معلم مكرر")
+        for uid in data.teacher_ids:
+            target = db.get(User, uid)
+            if not target or target.mosque_id != mid or target.role != TEACHER_ROLE or not target.active:
+                raise HTTPException(422, "اختر معلمين فعالين من نفس الفرع")
+        current = list(db.scalars(select(HalaqaTeacher.user_id).where(HalaqaTeacher.halaqa_id == ring.id, HalaqaTeacher.active.is_(True))))
+        before = {"teacher_ids": current}
+        after = {"teacher_ids": data.teacher_ids}
         target_type, target_id = "ring", ring.id
-    else:
-        if not data.user_id:
-            raise HTTPException(422, "اختر المستخدم")
-        target_user = db.get(User, data.user_id)
-        if not target_user or target_user.mosque_id != mid or target_user.role == "owner":
-            raise HTTPException(404, "المستخدم غير موجود في الفرع")
-        if not target_user.active:
-            raise HTTPException(422, "الحساب معطل بالفعل")
-        before = {"active": True}
-        after = {"active": False}
-        target_type, target_id = "user", target_user.id
-
-    existing = db.scalar(
-        select(HalaqaChangeRequest.id).where(
-            HalaqaChangeRequest.mosque_id == mid,
-            HalaqaChangeRequest.requested_by == supervisor.id,
-            HalaqaChangeRequest.action_type == data.action_type,
-            HalaqaChangeRequest.target_id == target_id,
-            HalaqaChangeRequest.status == "pending",
-        )
-    )
-    if existing:
-        raise HTTPException(409, "يوجد طلب معلق لنفس التعديل")
+    elif data.action_type == "deactivate_user":
+        if not data.user_id or data.active is None:
+            raise HTTPException(422, "اختر الحساب والحالة المطلوبة")
+        target = db.get(User, data.user_id)
+        if not target or target.mosque_id != mid or target.role == "owner":
+            raise HTTPException(404, "الحساب غير موجود")
+        before = {"active": bool(target.active)}
+        after = {"active": bool(data.active)}
+        target_type, target_id = "user", target.id
     row = HalaqaChangeRequest(
         mosque_id=mid,
-        requested_by=supervisor.id,
+        requested_by=user.id,
         action_type=data.action_type,
         target_type=target_type,
         target_id=target_id,
@@ -534,54 +407,44 @@ def create_change_request(mid: int, data: ChangeRequestInput, request: Request, 
         reason=data.reason.strip(),
         status="pending",
     )
-    db.add(row)
-    db.flush()
-    audit(db, supervisor.id, mid, "change_request_created", f"{data.action_type}:{row.id}")
+    db.add(row); db.flush()
+    audit(db, user.id, mid, "change_request_created", f"{row.id}:{row.action_type}")
     db.commit()
-    return {"ok": True, "request": _change_item(row, db)}
+    return {"ok": True, "pending_approval": True, "message": "تم رفع التعديل للمدير العام للموافقة", "request": _request_item(row, db)}
 
 
-def _apply_change(db, owner: User, row: HalaqaChangeRequest):
+def _apply_change(row: HalaqaChangeRequest, owner: User, db):
     before = _safe_json(row.before_json)
     after = _safe_json(row.after_json)
     if row.action_type == "student_transfer":
         student = db.get(HalaqaStudent, row.target_id)
-        if not student or not student.active:
-            raise HTTPException(409, "ملف الطالب لم يعد متاحًا")
-        current_ring = db.get(Halaqa, student.halaqa_id)
-        target_ring = db.get(Halaqa, after.get("halaqa_id"))
-        if not current_ring or current_ring.mosque_id != row.mosque_id or student.halaqa_id != before.get("halaqa_id"):
-            raise HTTPException(409, "تغيرت بيانات الطالب منذ إنشاء الطلب؛ اطلب تعديلًا جديدًا")
-        if not target_ring or not target_ring.active or target_ring.mosque_id != row.mosque_id:
-            raise HTTPException(409, "الحلقة المطلوبة لم تعد متاحة")
-        old = student.halaqa_id
-        student.halaqa_id = target_ring.id
-        audit_change(db, owner.id, row.mosque_id, "student_transferred_after_approval", student.id, {"halaqa_id": old}, {"halaqa_id": target_ring.id})
+        target = db.get(Halaqa, after.get("halaqa_id"))
+        if not student or not target or target.mosque_id != row.mosque_id:
+            raise HTTPException(409, "تعذر تنفيذ الطلب لأن البيانات تغيرت")
+        student.halaqa_id = target.id
+    elif row.action_type == "student_archive":
+        student = db.get(HalaqaStudent, row.target_id)
+        if not student:
+            raise HTTPException(409, "ملف الطالب لم يعد موجودًا")
+        student.active = bool(after.get("active"))
     elif row.action_type == "ring_update":
         ring = db.get(Halaqa, row.target_id)
-        if not ring or ring.mosque_id != row.mosque_id:
-            raise HTTPException(409, "الحلقة لم تعد متاحة")
-        if ring.name != before.get("name") or (ring.schedule or "") != (before.get("schedule") or ""):
-            raise HTTPException(409, "تغيرت الحلقة منذ إنشاء الطلب؛ اطلب تعديلًا جديدًا")
-        duplicate = db.scalar(select(Halaqa.id).where(Halaqa.mosque_id == row.mosque_id, Halaqa.name == after.get("name"), Halaqa.id != ring.id))
-        if duplicate:
-            raise HTTPException(409, "اسم الحلقة مستخدم الآن")
-        ring.name = after.get("name", ring.name)
-        ring.schedule = after.get("schedule", "")
-        audit_change(db, owner.id, row.mosque_id, "ring_updated_after_approval", ring.id, before, after)
+        if not ring:
+            raise HTTPException(409, "الحلقة لم تعد موجودة")
+        name = str(after.get("name") or "").strip()
+        if db.scalar(select(Halaqa.id).where(Halaqa.mosque_id == row.mosque_id, Halaqa.name == name, Halaqa.id != ring.id)):
+            raise HTTPException(409, "اسم الحلقة مستخدم في الفرع")
+        ring.name = name
+        ring.schedule = str(after.get("schedule") or "").strip()
     elif row.action_type == "teacher_assignment":
         ring = db.get(Halaqa, row.target_id)
-        if not ring or ring.mosque_id != row.mosque_id:
-            raise HTTPException(409, "الحلقة لم تعد متاحة")
-        current = _active_teacher_ids(db, ring.id)
-        expected = sorted(before.get("teacher_ids", []))
-        if current != expected:
-            raise HTTPException(409, "تغير معلمو الحلقة منذ إنشاء الطلب؛ اطلب تعديلًا جديدًا")
-        ids = sorted(set(after.get("teacher_ids", [])))
+        if not ring:
+            raise HTTPException(409, "الحلقة لم تعد موجودة")
+        ids = [int(x) for x in after.get("teacher_ids", [])]
         for uid in ids:
-            teacher = db.get(User, uid)
-            if not teacher or not teacher.active or teacher.mosque_id != row.mosque_id or teacher.role != TEACHER_ROLE:
-                raise HTTPException(409, "أحد المعلمين لم يعد صالحًا للتعيين")
+            target = db.get(User, uid)
+            if not target or target.mosque_id != row.mosque_id or target.role != TEACHER_ROLE or not target.active:
+                raise HTTPException(409, "أحد المعلمين لم يعد صالحًا للتكليف")
         links = db.scalars(select(HalaqaTeacher).where(HalaqaTeacher.halaqa_id == ring.id)).all()
         known = {x.user_id for x in links}
         for link in links:
@@ -589,73 +452,52 @@ def _apply_change(db, owner: User, row: HalaqaChangeRequest):
         for uid in ids:
             if uid not in known:
                 db.add(HalaqaTeacher(halaqa_id=ring.id, user_id=uid, assigned_by=owner.id, active=True))
-        audit_change(db, owner.id, row.mosque_id, "teachers_changed_after_approval", ring.id, before, after)
     elif row.action_type == "deactivate_user":
-        target_user = db.get(User, row.target_id)
-        if not target_user or target_user.mosque_id != row.mosque_id or target_user.role == "owner":
+        target = db.get(User, row.target_id)
+        if not target or target.role == "owner":
             raise HTTPException(409, "الحساب لم يعد متاحًا")
-        if bool(target_user.active) != bool(before.get("active", True)):
-            raise HTTPException(409, "تغيرت حالة الحساب منذ إنشاء الطلب")
-        target_user.active = False
-        db.execute(delete(AuthSession).where(AuthSession.user_id == target_user.id))
-        if target_user.role == TEACHER_ROLE:
-            db.execute(update(HalaqaTeacher).where(HalaqaTeacher.user_id == target_user.id).values(active=False))
-        elif target_user.role == SUPERVISOR_ROLE:
-            db.execute(update(HalaqaSupervisor).where(HalaqaSupervisor.user_id == target_user.id).values(active=False))
-            db.execute(update(Halaqa).where(Halaqa.supervisor_id == target_user.id).values(supervisor_id=None))
-        audit_change(db, owner.id, row.mosque_id, "user_deactivated_after_approval", target_user.id, before, after)
+        target.active = bool(after.get("active"))
+        if not target.active:
+            db.execute(delete(AuthSession).where(AuthSession.user_id == target.id))
     else:
         raise HTTPException(422, "نوع التعديل غير مدعوم")
+    audit_change(db, owner.id, row.mosque_id, "approved_sensitive_change", row.target_id or row.id, before, after)
 
 
 @router.post("/mosques/{mid}/change-requests/{qid}/approve")
-def approve_change(mid: int, qid: int, data: ReviewInput, request: Request, db=Depends(get_db)):
+def approve_change(mid: int, qid: int, data: Review, request: Request, db=Depends(get_db)):
     owner = _require(request, db, mid, {"owner"})
+    if owner.role != "owner":
+        raise HTTPException(403, "الاعتماد من صلاحية المدير العام")
     row = db.scalar(select(HalaqaChangeRequest).where(HalaqaChangeRequest.id == qid, HalaqaChangeRequest.mosque_id == mid).with_for_update())
     if not row:
         raise HTTPException(404, "طلب التعديل غير موجود")
     if row.status != "pending":
-        raise HTTPException(409, "تمت معالجة الطلب مسبقًا")
-    _apply_change(db, owner, row)
+        raise HTTPException(409, "تمت معالجة هذا الطلب مسبقًا")
+    _apply_change(row, owner, db)
     row.status = "approved"
     row.reviewed_by = owner.id
     row.review_note = data.note.strip()
     row.reviewed_at = datetime.utcnow()
-    audit(db, owner.id, mid, "change_request_approved", f"{row.action_type}:{row.id}")
+    audit(db, owner.id, mid, "change_request_approved", f"{row.id}:{row.action_type}")
     db.commit()
-    return {"ok": True, "request": _change_item(row, db)}
+    return {"ok": True, "request": _request_item(row, db)}
 
 
 @router.post("/mosques/{mid}/change-requests/{qid}/reject")
-def reject_change(mid: int, qid: int, data: ReviewInput, request: Request, db=Depends(get_db)):
+def reject_change(mid: int, qid: int, data: Review, request: Request, db=Depends(get_db)):
     owner = _require(request, db, mid, {"owner"})
+    if owner.role != "owner":
+        raise HTTPException(403, "الرفض من صلاحية المدير العام")
     row = db.scalar(select(HalaqaChangeRequest).where(HalaqaChangeRequest.id == qid, HalaqaChangeRequest.mosque_id == mid).with_for_update())
     if not row:
         raise HTTPException(404, "طلب التعديل غير موجود")
     if row.status != "pending":
-        raise HTTPException(409, "تمت معالجة الطلب مسبقًا")
+        raise HTTPException(409, "تمت معالجة هذا الطلب مسبقًا")
     row.status = "rejected"
     row.reviewed_by = owner.id
     row.review_note = data.note.strip()
     row.reviewed_at = datetime.utcnow()
-    audit(db, owner.id, mid, "change_request_rejected", f"{row.action_type}:{row.id}")
+    audit(db, owner.id, mid, "change_request_rejected", f"{row.id}:{row.action_type}")
     db.commit()
-    return {"ok": True, "request": _change_item(row, db)}
-
-
-@router.post("/mosques/{mid}/change-requests/{qid}/cancel")
-def cancel_change(mid: int, qid: int, request: Request, db=Depends(get_db)):
-    user = _require(request, db, mid, {SUPERVISOR_ROLE})
-    row = db.scalar(select(HalaqaChangeRequest).where(HalaqaChangeRequest.id == qid, HalaqaChangeRequest.mosque_id == mid).with_for_update())
-    if not row:
-        raise HTTPException(404, "طلب التعديل غير موجود")
-    if row.status != "pending":
-        raise HTTPException(409, "لا يمكن إلغاء طلب تمت معالجته")
-    if user.role != "owner" and row.requested_by != user.id:
-        raise HTTPException(403, "لا يمكنك إلغاء طلب مشرف آخر")
-    row.status = "cancelled"
-    row.reviewed_by = user.id
-    row.reviewed_at = datetime.utcnow()
-    audit(db, user.id, mid, "change_request_cancelled", f"{row.action_type}:{row.id}")
-    db.commit()
-    return {"ok": True, "request": _change_item(row, db)}
+    return {"ok": True, "request": _request_item(row, db)}

@@ -4,7 +4,7 @@ const $=s=>document.querySelector(s),esc=s=>String(s??'').replace(/[&<>"']/g,c=>
 const roles={owner:'المالك',halaqa_supervisor:'مشرف الحلقات',halaqa_teacher:'المدرس',halaqa_student:'الطالب / ولي الأمر'};
 const states={pending:'بانتظار المالك',approved:'تم التفعيل',rejected:'مرفوض',returned:'مُعاد للاستكمال'},attendance={present:'حاضر',absent:'غائب',excused:'مستأذن'};
 const today=()=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Riyadh'}).format(new Date());
-let mid=0,data=null,file=null,sid=0,busy=false,portalView='owner',monitor=null,follow=null;
+let mid=0,data=null,file=null,sid=0,busy=false,portalView='owner',monitor=null,follow=null,accessOverview=null;
 const status=t=>$('#halaqatStatus').textContent=t,base=()=>'/api/halaqat/mosques/'+mid;
 async function api(path,body,method='POST'){
  const r=await fetch(path,{cache:'no-store',headers:{'X-Portal-View':portalView},...(body!==undefined?{method,headers:{'Content-Type':'application/json','X-Portal-View':portalView},body:JSON.stringify(body)}:{})}),d=await r.json();
@@ -22,22 +22,30 @@ function familyOptions(){return (data.accounts||[]).filter(u=>u.role==='halaqa_s
 function requestDetails(r){if(r.type!=='student')return '';return '<p>ولي الأمر: '+esc(r.guardian_name||'—')+' · '+esc(r.guardian_relation||'—')+' · '+esc(r.guardian_phone||'—')+'</p><p>الحفظ الحالي: '+esc(r.current_memorization||'—')+'</p>';}
 let selectedStudentRing='';
 function students(){
- if(!data.students.length)return empty('لا يوجد طلاب معتمدون بعد.');
+ if(!data.rings.length)return empty('لا توجد حلقات متاحة بعد.');
  if(!data.rings.some(r=>String(r.id)===selectedStudentRing))selectedStudentRing='';
  const cards=data.students.map(s=>{
   const optional=[!s.has_national_id?'رقم الهوية':'',!s.birth_date?'تاريخ الميلاد':'',!s.school_grade?'الصف الدراسي':''].filter(Boolean);
   const phone=s.guardian_phone||'';
   return '<div class="student-row" data-student-ring="'+s.halaqa_id+'" data-student-name="'+esc(s.name)+'" hidden><div><strong>'+esc(s.name)+'</strong><small>'+esc(s.recipient_type==='guardian'?'ولي الأمر: '+(s.guardian_name||'غير مسجل'):'الحساب للطالب')+'</small><small>جوال التواصل: '+(phone?'<bdi>'+esc(phone)+'</bdi>':'غير مسجل')+'</small>'+(optional.length?'<small class="optional-note">بيانات اختيارية غير مسجلة: '+esc(optional.join('، '))+'</small>':'')+'</div>'+button('ملف الطالب','data-file="'+s.id+'"')+'</div>';
  }).join('');
- return '<label>اختر الحلقة<select id="studentRingFilter"><option value="">اختر الحلقة لعرض طلابها</option>'+data.rings.map(r=>'<option value="'+r.id+'" '+(selectedStudentRing===String(r.id)?'selected':'')+'>'+esc(r.name)+'</option>').join('')+'</select></label><label>بحث داخل الحلقة<input id="studentSearch" type="search"></label><p id="studentListHint">اختر الحلقة لعرض طلابها.</p><div>'+cards+'</div>';
+ return '<label>اختر الحلقة<select id="studentRingFilter"><option value="">اختر الحلقة لعرض طلابها</option>'+data.rings.map(r=>'<option value="'+r.id+'" '+(selectedStudentRing===String(r.id)?'selected':'')+'>'+esc(r.name)+'</option>').join('')+'</select></label><div id="selectedRingWorkspace"></div><label>بحث داخل الحلقة<input id="studentSearch" type="search"></label><p id="studentListHint">اختر الحلقة لعرض طلابها.</p><div>'+cards+'</div>';
 }
 function filterStudentList(){
  const select=$('#studentRingFilter');if(!select)return;selectedStudentRing=select.value;
+ const overview=$('#selectedRingWorkspace');if(overview&&overview.dataset.ring!==selectedStudentRing){overview.dataset.ring=selectedStudentRing;renderSelectedRing();}
  const query=($('#studentSearch')?.value||'').trim();let count=0;
  document.querySelectorAll('[data-student-ring]').forEach(row=>{row.hidden=!selectedStudentRing||row.dataset.studentRing!==selectedStudentRing||!row.dataset.studentName.includes(query);if(!row.hidden)count++;});
  $('#studentListHint').textContent=selectedStudentRing?(count?'عدد الطلاب: '+count:'لا يوجد طلاب مطابقون في هذه الحلقة.'):'اختر الحلقة لعرض طلابها.';
 }
 
+function circleCalendar(rows){const manager=['owner','halaqa_supervisor'].includes(data.user.role);return rows.map(c=>'<article class="halaqat-card"><h3>'+esc(c.name)+'</h3><p>'+(c.configured?c.weekdays.map(d=>dayNames[d]).join('، ')||'لا توجد لقاءات أسبوعية':'لم يحدد الجدول بعد')+' · '+esc(c.time_text)+'</p><p>اليوم: '+(c.today_held?'يوجد لقاء':'لا يوجد لقاء محدد')+'</p>'+c.exceptions.map(x=>'<p>'+x.day+' · '+(x.held?'لقاء استثنائي':'إجازة / إلغاء')+' · '+esc(x.reason)+(manager?button('إزالة الاستثناء','data-calendar-remove="'+c.id+'" data-day="'+x.day+'"'):'')+'</p>').join('')+(manager?fold('تعديل الجدول والإجازات',form15('calendarForm'+c.id,'<fieldset><legend>أيام اللقاءات</legend>'+dayNames.map((d,i)=>'<label class="toggle-label"><input name="weekdays" type="checkbox" value="'+i+'" '+(c.weekdays.includes(i)?'checked':'')+'>'+d+'</label>').join('')+'</fieldset>'+input('time_text','وقت الحلقة',c.time_text,'text',false,'maxlength="100"')+'<button>حفظ الجدول</button>','data-kind="calendar" data-ring="'+c.id+'"')+form15('exceptionForm'+c.id,input('day','تاريخ الاستثناء',today(),'date')+select('held','نوع الاستثناء',[['false','إجازة أو إلغاء اللقاء'],['true','إضافة لقاء استثنائي']])+input('reason','السبب','','text',false,'maxlength="500"')+'<button>حفظ الاستثناء</button>','data-kind="exception" data-ring="'+c.id+'"')):'')+'</article>').join('')||empty('لا توجد حلقات متاحة.');}
+function renderSelectedRing(){
+ const box=$('#selectedRingWorkspace'),ring=data.rings.find(r=>String(r.id)===selectedStudentRing);if(!box)return;
+ if(!ring||data.user.role==='halaqa_student'){box.innerHTML='';return;}
+ const announcements=development.announcements.filter(a=>a.halaqa_id===ring.id||a.halaqa_id===null);
+ box.innerHTML='<section class="ring-overview"><h3>'+esc(ring.name)+'</h3><p>المشرفون: '+esc((ring.supervisors||[]).map(x=>x.name).join('، ')||'غير محدد')+'</p><p>المعلمون: '+esc((ring.teachers||[]).map(x=>x.name).join('، ')||'بانتظار إصدار الحساب')+' · عدد الطلاب: '+ring.student_count+'</p>'+fold('جدول الحلقة وإجازاتها',circleCalendar(development.calendars.filter(c=>c.id===ring.id)))+'<h3>إعلانات الحلقة</h3>'+(announcements.map(a=>'<article class="halaqat-card"><strong>'+esc(a.title)+'</strong><small>'+esc(a.ring)+(a.expires?' · حتى '+esc(a.expires):'')+'</small><p class="preserve-lines">'+esc(a.body)+'</p>'+(a.can_archive?button('أرشفة الإعلان','data-announcement-archive="'+a.id+'"'):'')+'</article>').join('')||empty('لا توجد إعلانات حالية لهذه الحلقة.'))+fold('إضافة إعلان لهذه الحلقة',form15('ringAnnouncementForm','<p>سينشر الإعلان في: <strong>'+esc(ring.name)+'</strong></p><input type="hidden" name="halaqa_id" value="'+ring.id+'">'+input('title','عنوان الإعلان','','text',true,'minlength="2" maxlength="180"')+textArea('body','نص الإعلان')+input('expires','ينتهي في (اختياري)','','date',false)+'<button>نشر إعلان الحلقة</button>'))+'</section><h3>طلاب الحلقة</h3>';
+}
 function rings(){return data.rings.length?data.rings.map(r=>'<div class="halaqat-card"><h3>'+esc(r.name)+'</h3><p>'+esc(r.schedule)+'</p><p>المشرفون: '+esc((r.supervisors||[]).map(s=>s.name).join('، ')||'غير محدد')+' · المدرسون: '+esc((r.teachers||[]).map(t=>t.name).join('، ')||'بانتظار إصدار الحساب')+' · الطلاب: '+r.student_count+'</p></div>').join(''):empty('أنشئ الحلقة واربطها بمشرف قبل طلب حساب المدرس.');}
 function recentAbsences(){const since=new Date();since.setDate(since.getDate()-29);const cutoff=since.toISOString().slice(0,10),rows=data.students.map(s=>({...s,absences:data.progress.filter(p=>p.student_id===s.id&&p.attendance==='absent'&&p.day>=cutoff).length})).filter(s=>s.absences>=3);return rows.length?rows.map(s=>'<div class="student-row"><span>'+esc(s.name)+' · '+s.absences+' أيام غياب</span>'+button('متابعة الملف','data-file="'+s.id+'"')+'</div>').join(''):empty('لا يوجد طالب سجل 3 أيام غياب أو أكثر خلال آخر 30 يومًا.');}
 function renderBaseDashboard(){
@@ -50,10 +58,10 @@ function renderBaseDashboard(){
  if(role==='owner'||role==='halaqa_supervisor')s+=panel('إنشاء حلقة','<form id="ringForm" class="halaqat-form">'+input('name','اسم الحلقة','','text',true,'minlength="2" maxlength="180"')+input('schedule','أيام الحلقة ووقتها','','text',false)+(role==='owner'?multiSelect('supervisor_ids','مشرفو الحلقة',data.supervisors.map(s=>[s.id,s.name])):'')+'<button>حفظ الحلقة</button></form>');
  if(role==='halaqa_supervisor'||role==='owner')s+=panel(role==='owner'?'إضافة مدرس وطلب حسابه':'طلب حساب مدرس','<form id="teacherRequestForm" class="halaqat-form">'+accountFields()+'<button>رفع الطلب للمالك</button></form>');
  if(['owner','halaqa_supervisor','halaqa_teacher'].includes(role))s+=panel(role==='owner'?'إضافة ملف طالب':'رفع ملف طالب للمالك','<form id="studentRequestForm" class="halaqat-form">'+accountFields(true)+'<button>'+(role==='owner'?'تجهيز ملف الطالب':'رفع الملف للمالك')+'</button></form>');
- s+=panel('ملفات الطلاب',students())+panel('الحلقات',rings())+panel('طلبات الحسابات',requests())+panel('متابعة الغياب خلال 30 يومًا',recentAbsences());
+ s+=panel('الحلقة وطلابها',students())+panel('طلبات الحسابات',requests())+panel('متابعة الغياب خلال 30 يومًا',recentAbsences());
  $('#halaqatWorkspace').innerHTML='<div class="halaqat-grid">'+s+'</div>';
 }
-async function load(){$('#halaqatApp').classList.remove('file-open');data=await api(base()+'/dashboard');monitor=await api(base()+'/monitor');development=await api(base()+'/development');orgOverview=data.user.role==='owner'?await api('/api/halaqat/organizations/overview'):null;managementTeachers=data.user.role==='owner'?(await api(base()+'/teachers/manage')).teachers:[];managementSupervisors=data.user.role==='owner'?(await api(base()+'/supervisors/manage')).supervisors:[];learningData=await api(base()+'/learning-dashboard');contestData=(await api(base()+'/competitions')).competitions;$('#halaqatWorkspace').hidden=false;renderDashboard();renderManagement();renderLearningDashboard();await renderAdvancedDashboard();organize20('halaqatWorkspace',false);filterStudentList();$('#studentFile').hidden=true;status(roles[data.user.role]+' · '+data.user.name+' · تم تحديث البيانات');}
+async function load(){$('#halaqatApp').classList.remove('file-open');data=await api(base()+'/dashboard');monitor=await api(base()+'/monitor');development=await api(base()+'/development');orgOverview=data.user.role==='owner'?await api('/api/halaqat/organizations/overview'):null;managementTeachers=data.user.role==='owner'?(await api(base()+'/teachers/manage')).teachers:[];managementSupervisors=data.user.role==='owner'?(await api(base()+'/supervisors/manage')).supervisors:[];accessOverview=['owner','halaqa_supervisor'].includes(data.user.role)?await api('/api/access/mosques/'+mid+'/overview'):null;learningData=await api(base()+'/learning-dashboard');contestData=(await api(base()+'/competitions')).competitions;$('#halaqatWorkspace').hidden=false;renderDashboard();renderManagement();renderAccessManagement();renderLearningDashboard();await renderAdvancedDashboard();organize20('halaqatWorkspace',false);filterStudentList();$('#studentFile').hidden=true;const accountLabel=data.user.role==='halaqa_student'?(data.user.account_type==='guardian'?'ولي الأمر':'الطالب'):roles[data.user.role];status(accountLabel+' · '+data.user.name+' · تم تحديث البيانات');}
 function quantity(prefix,title,u='page',amount=1){const preset=u==='ayah'?'ayah':[.5,1,2].includes(Number(amount))?String(amount):'custom';return '<fieldset class="quantity"><legend>'+title+'</legend>'+select(prefix+'_preset','المقدار',[['0.5','نصف وجه'],['1','وجه واحد'],['2','وجهان'],['custom','عدد أوجه مخصص'],['ayah','عدد آيات محدد']],preset)+input(prefix+'_amount','العدد',amount,'number',true,'min="0.5" max="1000" step="0.5"')+'</fieldset>';}
 function planEditor(){const p=file.plan||{memorization_unit:'page',memorization_amount:1,revision_unit:'page',revision_amount:2,sessions_per_week:5};return '<form id="planForm" class="halaqat-form"><div class="halaqat-form-grid">'+quantity('memorization','الحفظ لكل لقاء',p.memorization_unit,p.memorization_amount)+quantity('revision','المراجعة لكل لقاء',p.revision_unit,p.revision_amount)+input('sessions_per_week','عدد اللقاءات أسبوعيًا',p.sessions_per_week,'number',true,'min="1" max="7"')+input('start_surah','سورة البداية',p.start_surah||'','text',false)+input('start_ayah','آية البداية',p.start_ayah||'','number',false,'min="1" max="286"')+input('end_surah','سورة النهاية',p.end_surah||'','text',false)+input('end_ayah','آية النهاية',p.end_ayah||'','number',false,'min="1" max="286"')+input('notes','تعليمات الخطة',p.notes||'','text',false)+'</div><button>حفظ خطة الطالب</button></form>';}
 function planSummary(){const p=file.plan;if(!p)return empty('لم يحدد المدرس خطة بعد.');return '<p>الحفظ: <strong>'+p.memorization_amount+' '+unit(p.memorization_unit)+'</strong> لكل لقاء</p><p>المراجعة: <strong>'+p.revision_amount+' '+unit(p.revision_unit)+'</strong> لكل لقاء</p><p>'+p.sessions_per_week+' لقاءات أسبوعيًا</p><p>'+esc(p.start_surah)+' '+esc(p.start_ayah??'')+' — '+esc(p.end_surah)+' '+esc(p.end_ayah??'')+'</p><p>'+esc(p.notes)+'</p>';}
@@ -149,7 +157,7 @@ async function submitExtra(f,p){
   if(/\s/u.test(p.username))throw Error('اسم المستخدم لا يقبل المسافات. استخدم: '+p.username.replace(/\s+/gu,'_'));
   credentials(await api(url+'/recipient-account',p));
  }
- else if(f.id==='transferForm'){p.halaqa_id=Number(p.halaqa_id);await api(url+'/transfer',p);}
+ else if(f.id==='transferForm'){p.halaqa_id=Number(p.halaqa_id);const d=await api(url+'/transfer',p);if(d.pending_approval){await openFile(sid,false);status(d.message||'تم رفع طلب النقل للمدير العام');return;}}
  else if(f.id==='assignmentForm')await api(url+'/assignments',p);
  else if(f.matches('.assignment-result'))await api(url+'/assignments/'+f.dataset.id,p,'PUT');
  else if(f.id==='appointmentForm')await api(url+'/exam-appointments',p);
@@ -185,9 +193,9 @@ const form15=(id,body,attrs='')=>'<form id="'+id+'" data-v15 class="halaqat-form
 const textArea=(name,label,value='',max=3000)=>'<label>'+label+'<textarea name="'+name+'" maxlength="'+max+'" required rows="3">'+esc(value)+'</textarea></label>';
 function renderDevelopmentDashboard(){
  let html='';const role=data.user.role,staff=role!=='halaqa_student',manager=['owner','halaqa_supervisor'].includes(role);
- html+=panel('إعلانات الحلقة',development.announcements.map(a=>'<article class="halaqat-card"><h3>'+esc(a.title)+'</h3><small>'+esc(a.ring)+(a.expires?' · حتى '+esc(a.expires):'')+'</small><p class="preserve-lines">'+esc(a.body)+'</p>'+(a.can_archive?button('أرشفة الإعلان','data-announcement-archive="'+a.id+'"'):'')+'</article>').join('')||empty('لا توجد إعلانات حالية.'));
- if(staff)html+=panel('نشر إعلان',fold('كتابة إعلان للحلقة',form15('announcementForm',select('halaqa_id','نطاق الإعلان',[(role==='owner'?['','جميع حلقات المسجد']:['','اختر الحلقة']),...data.rings.map(r=>[r.id,r.name])],'',role!=='owner')+input('title','العنوان','','text',true,'minlength="2" maxlength="180"')+textArea('body','نص الإعلان')+input('expires','ينتهي في (اختياري)','','date',false)+'<button>نشر الإعلان داخل النظام</button>')));
- html+=panel('جدول اللقاءات والإجازات',development.calendars.map(c=>'<article class="halaqat-card"><h3>'+esc(c.name)+'</h3><p>'+(c.configured?c.weekdays.map(d=>dayNames[d]).join('، ')||'لا توجد لقاءات أسبوعية':'لم يحدد الجدول بعد')+' · '+esc(c.time_text)+'</p><p>اليوم: '+(c.today_held?'يوجد لقاء':'لا يوجد لقاء محدد')+'</p>'+c.exceptions.map(x=>'<p>'+x.day+' · '+(x.held?'لقاء استثنائي':'إجازة / إلغاء')+' · '+esc(x.reason)+(manager?button('إزالة الاستثناء','data-calendar-remove="'+c.id+'" data-day="'+x.day+'"'):'')+'</p>').join('')+(manager?fold('تعديل الجدول والإجازات',form15('calendarForm'+c.id,'<fieldset><legend>أيام اللقاءات</legend>'+dayNames.map((d,i)=>'<label class="toggle-label"><input name="weekdays" type="checkbox" value="'+i+'" '+(c.weekdays.includes(i)?'checked':'')+'>'+d+'</label>').join('')+'</fieldset>'+input('time_text','وقت الحلقة',c.time_text,'text',false,'maxlength="100"')+'<button>حفظ الجدول</button>','data-kind="calendar" data-ring="'+c.id+'"')+form15('exceptionForm'+c.id,input('day','تاريخ الاستثناء',today(),'date')+select('held','نوع الاستثناء',[['false','إجازة أو إلغاء اللقاء'],['true','إضافة لقاء استثنائي']])+input('reason','السبب','','text',false,'maxlength="500"')+'<button>حفظ الاستثناء</button>','data-kind="exception" data-ring="'+c.id+'"')):'')+'</article>').join('')||empty('لا توجد حلقات متاحة.'));
+ if(!staff)html+=panel('إعلانات الحلقة',development.announcements.map(a=>'<article class="halaqat-card"><h3>'+esc(a.title)+'</h3><small>'+esc(a.ring)+(a.expires?' · حتى '+esc(a.expires):'')+'</small><p class="preserve-lines">'+esc(a.body)+'</p>'+(a.can_archive?button('أرشفة الإعلان','data-announcement-archive="'+a.id+'"'):'')+'</article>').join('')||empty('لا توجد إعلانات حالية.'));
+ if(role==='owner')html+=panel('نشر إعلان عام أو لحلقة',fold('كتابة إعلان للحلقة',form15('announcementForm',select('halaqa_id','نطاق الإعلان',[(role==='owner'?['','جميع حلقات المسجد']:['','اختر الحلقة']),...data.rings.map(r=>[r.id,r.name])],'',role!=='owner')+input('title','العنوان','','text',true,'minlength="2" maxlength="180"')+textArea('body','نص الإعلان')+input('expires','ينتهي في (اختياري)','','date',false)+'<button>نشر الإعلان داخل النظام</button>')));
+ if(!staff)html+=panel('جدول اللقاءات والإجازات',circleCalendar(development.calendars));
  html+=panel('المراسلات الجديدة',development.unread.map(x=>'<div class="student-row"><span>'+esc(x.name)+' · '+x.count+' رسالة</span>'+button('فتح الملف','data-file="'+x.id+'"')+'</div>').join('')||empty('لا توجد رسائل غير مقروءة.'));
  html+=panel('الاختبارات المنظمة القادمة',development.upcoming_exams.map(x=>'<div class="student-row"><span>'+esc(x.name)+' · '+esc(x.title)+' · '+x.due+'</span>'+button('التفاصيل','data-file="'+x.student_id+'"')+'</div>').join('')||empty('لا توجد اختبارات منظمة قادمة.'));
  if(manager){html+=panel('اعتذارات بانتظار المراجعة',development.pending_excuses.map(x=>'<div class="halaqat-card"><strong>'+esc(x.name)+'</strong><p>'+x.day+' · '+esc(x.reason)+'</p>'+button('مراجعة العذر','data-file="'+x.student_id+'"')+'</div>').join('')||empty('لا توجد اعتذارات معلقة.'));
@@ -228,7 +236,7 @@ async function submitDevelopment(f){
  else if(f.dataset.kind==='organizedResult'){const x=studentDev.exams.find(x=>x.id===Number(f.dataset.id));const payload={day:p.day,notes:p.notes,retake_due:p.retake_due||null,scores:x.criteria.map((_,i)=>Number(p['score_'+i]))};await api(url+'/organized-exams/'+x.id+'/result',payload,'PUT');}
  else if(f.dataset.kind==='calendar'){await api(base()+'/rings/'+f.dataset.ring+'/calendar',{weekdays:fd.getAll('weekdays').map(Number),time_text:p.time_text},'PUT');dashboard=true;}
  else if(f.dataset.kind==='exception'){p.held=p.held==='true';await api(base()+'/rings/'+f.dataset.ring+'/calendar-exception',p,'PUT');dashboard=true;}
- else if(f.id==='announcementForm'){p.halaqa_id=p.halaqa_id?Number(p.halaqa_id):null;p.expires=p.expires||null;await api(base()+'/announcements',p);dashboard=true;}
+ else if(['announcementForm','ringAnnouncementForm'].includes(f.id)){p.halaqa_id=p.halaqa_id?Number(p.halaqa_id):null;p.expires=p.expires||null;await api(base()+'/announcements',p);dashboard=true;}
  else if(f.id==='mosqueCreateForm'){const m=await api('/api/halaqat/organizations',p);mid=m.id;await refreshOrganizations();dashboard=true;}
  else if(f.id==='mosqueRenameForm'){await api(base()+'/organization',p,'PUT');await refreshOrganizations();dashboard=true;}
  else if(f.id==='importForm'){const response=await fetch(base()+'/imports/preview',{method:'POST',headers:{'X-Portal-View':portalView},body:fd});const d=await response.json();if(!response.ok)throw Error(typeof d.detail==='string'?d.detail:'تعذر قراءة الملف');showImportPreview(d);status('راجع الصفوف ثم اعتمد السليم منها');return;}
@@ -242,7 +250,7 @@ document.addEventListener('click',e=>{
  if(b.hasAttribute('data-add-criterion')){if($('#examCriteria').children.length>=10){status('الحد الأقصى 10 معايير');return;}$('#examCriteria').insertAdjacentHTML('beforeend',criterionFields());}
  if(b.hasAttribute('data-remove-criterion'))b.closest('.criterion-row').remove();
  if(b.dataset.openMosque)run(async()=>{mid=Number(b.dataset.openMosque);$('#halaqatMosque').value=String(mid);await load();});
- if(b.dataset.studentArchive||b.dataset.accountArchive)run(async()=>{const reason=prompt(b.dataset.active==='true'?'سبب الاستعادة:':'سبب الأرشفة:');if(reason===null)return;const path=b.dataset.studentArchive?'/students/'+b.dataset.studentArchive:'/users/'+b.dataset.accountArchive;await api(base()+path+'/archive',{active:b.dataset.active==='true',reason},'PUT');await load();});
+ if(b.dataset.studentArchive||b.dataset.accountArchive)run(async()=>{const reason=prompt(b.dataset.active==='true'?'سبب الاستعادة:':'سبب الأرشفة:');if(reason===null)return;const path=b.dataset.studentArchive?'/students/'+b.dataset.studentArchive:'/users/'+b.dataset.accountArchive;const d=await api(base()+path+'/archive',{active:b.dataset.active==='true',reason},'PUT');await load();if(d.pending_approval)status(d.message||'تم رفع الطلب للمدير العام للموافقة');});
  if(b.dataset.announcementArchive)run(async()=>{await api(base()+'/announcements/'+b.dataset.announcementArchive+'/archive',{});await load();});
  if(b.dataset.calendarRemove)run(async()=>{await api(base()+'/rings/'+b.dataset.calendarRemove+'/calendar-exception/'+b.dataset.day,{},'DELETE');await load();});
  if(b.dataset.cancelExam)run(async()=>{await api(base()+'/students/'+sid+'/organized-exams/'+b.dataset.cancelExam+'/cancel',{});await openFile(sid,false);});
@@ -326,6 +334,54 @@ document.addEventListener('click',e=>{
   $('#deleteRing'+id).innerHTML='<div class="absence-alert"><p>حذف نهائي للحلقة وطلابها وسجلاتهم، بما فيها المؤرشفة والحضور والتسميع والاختبارات والأوراد والشهادات والمراسلات والطلبات. لا يمكن التراجع عنه من النظام. يمكنك نقل الطلاب لحلقة أخرى أولًا. تبقى حسابات الدخول وسجل العمليات.</p><p>عدد ملفات الطلاب: '+p.counts.students+' · طلبات الحسابات: '+p.counts.requests+'</p><form data-manage="delete" data-id="'+id+'" class="halaqat-form">'+input('confirm_name','اكتب اسم الحلقة للتأكيد: '+p.name)+input('token','',p.token,'hidden')+'<button>حذف نهائي بكل السجلات</button></form></div>';
  });
 });
+
+// v20.5: role/account administration and supervisor -> owner approval workflow.
+function accessRequestCard(r,owner=false){
+ const details=(r.details||[]).map(x=>'<p>'+esc(x)+'</p>').join('');
+ const review=r.review_note?'<p><strong>ملاحظة المدير:</strong> '+esc(r.review_note)+'</p>':'';
+ const actions=owner&&r.status==='pending'?'<div class="actions">'+button('موافقة','data-change-approve="'+r.id+'"')+button('رفض','data-change-reject="'+r.id+'"')+'</div>':'';
+ return '<article class="halaqat-card"><span class="halaqat-badge '+esc(r.status)+'">'+esc(r.status_label)+'</span><h3>'+esc(r.action_label)+'</h3>'+details+'<p><strong>السبب:</strong> '+esc(r.reason||'—')+'</p><small>رفع الطلب: '+esc(r.requested_by||'—')+'</small>'+review+actions+'</article>';
+}
+function renderAccessManagement(){
+ if(!accessOverview||!$('#halaqatWorkspace .halaqat-grid'))return;
+ let out='';
+ if(data.user.role==='owner'){
+  const roleOpts=[['supervisor','مشرف فرع'],['teacher','معلم'],['guardian','ولي أمر'],['student','طالب']];
+  const ringOptions=[['','بدون ربط الآن'],...accessOverview.rings.map(x=>[x.id,x.name])];
+  const studentOptions=[['','بدون ربط الآن'],...accessOverview.unlinked_students.map(x=>[x.id,x.name])];
+  out+=panel('إصدار حساب مستخدم','<form class="halaqat-form" data-access="create-user">'+input('full_name','الاسم الكامل','','text',true,'minlength="2" maxlength="180"')+input('username','اسم المستخدم','','text',true,'minlength="3" maxlength="30"')+select('role','نوع الحساب',roleOpts)+input('email','البريد الإلكتروني (اختياري)','','email',false,'maxlength="200"')+select('halaqa_id','الحلقة للمعلم أو المشرف (اختياري)',ringOptions,'',false)+select('student_id','ملف الطالب للطالب أو ولي الأمر (اختياري)',studentOptions,'',false)+'<small>يصدر النظام رمزًا مؤقتًا ويطلب تغييره عند أول دخول. القوائم تعرض الأسماء بدل الأرقام.</small><button>إصدار الحساب</button></form>');
+  out+=panel('إدارة أسماء المستخدمين',accessOverview.users.map(u=>'<details><summary>'+esc(u.name)+' · '+esc(u.role_label)+(u.active?'':' · موقوف')+'</summary><form class="halaqat-form" data-access="edit-user" data-id="'+u.id+'">'+input('full_name','الاسم الكامل',u.name)+input('username','اسم المستخدم',u.username,'text',true,'minlength="3" maxlength="30"')+input('email','البريد الإلكتروني',u.email,'email',false)+select('active','حالة الحساب',[['true','فعال'],['false','موقوف']],String(u.active))+'<small>يمنع تكرار اسم المستخدم. تغييره يلغي جلسات الدخول الحالية للحساب فقط.</small><button>حفظ بيانات الحساب</button></form></details>').join('')||empty('لا توجد حسابات.'));
+  out+=panel('طلبات التعديلات الكبيرة · المعلقة '+accessOverview.pending_count,(accessOverview.change_requests.length?accessOverview.change_requests.map(r=>accessRequestCard(r,true)).join(''):empty('لا توجد طلبات تعديل.')));
+ }else if(data.user.role==='halaqa_supervisor'){
+  out+=panel('رفع تعديل كبير للمدير العام','<details><summary>تعديل اسم أو موعد حلقة</summary><form class="halaqat-form" data-access="change-ring">'+select('ring_id','الحلقة',accessOverview.rings.map(x=>[x.id,x.name]))+input('name','الاسم الجديد')+input('schedule','الموعد / الوصف الجديد','','text',false)+input('reason','سبب التعديل')+'<button>رفع طلب الموافقة</button></form></details><details><summary>تغيير معلمي حلقة</summary><form class="halaqat-form" data-access="change-teachers">'+select('ring_id','الحلقة',accessOverview.rings.map(x=>[x.id,x.name]))+multiSelect('teacher_ids','المعلمون',accessOverview.teachers.map(x=>[x.id,x.name]))+input('reason','سبب التعديل')+'<button>رفع طلب الموافقة</button></form></details><small>نقل الطالب وأرشفته من ملف الطالب يرفعان طلب موافقة أيضًا ولا ينفذان مباشرة.</small>');
+  out+=panel('طلبات التعديل المرفوعة',accessOverview.change_requests.length?accessOverview.change_requests.map(r=>accessRequestCard(r,false)).join(''):empty('لم ترفع طلبات تعديل كبيرة بعد.'));
+ }
+ if(out)$('#halaqatWorkspace .halaqat-grid').insertAdjacentHTML('beforeend',out);
+}
+document.addEventListener('submit',e=>{
+ const f=e.target;if(!f.dataset.access)return;e.preventDefault();run(async()=>{
+  const fd=new FormData(f),p=Object.fromEntries(fd),kind=f.dataset.access;
+  if(kind==='create-user'){
+   p.halaqa_id=p.halaqa_id?Number(p.halaqa_id):null;p.student_id=p.student_id?Number(p.student_id):null;
+   credentials(await api('/api/access/mosques/'+mid+'/users',p));
+  }else if(kind==='edit-user'){
+   p.active=p.active==='true';await api('/api/access/mosques/'+mid+'/users/'+f.dataset.id,p,'PUT');
+  }else if(kind==='change-ring'){
+   p.action_type='ring_update';p.ring_id=Number(p.ring_id);await api('/api/access/mosques/'+mid+'/change-requests',p);
+  }else if(kind==='change-teachers'){
+   p.action_type='teacher_assignment';p.ring_id=Number(p.ring_id);p.teacher_ids=fd.getAll('teacher_ids').map(Number);await api('/api/access/mosques/'+mid+'/change-requests',p);
+  }
+  await load();status(kind.startsWith('change-')?'تم رفع الطلب للمدير العام للموافقة':'تم الحفظ بنجاح');
+ });
+});
+document.addEventListener('click',e=>{
+ const b=e.target.closest('[data-change-approve],[data-change-reject]');if(!b)return;run(async()=>{
+  const approve=b.hasAttribute('data-change-approve'),id=b.dataset.changeApprove||b.dataset.changeReject;
+  const note=prompt(approve?'ملاحظة الموافقة (اختياري):':'سبب الرفض (اختياري):','');if(note===null)return;
+  await api('/api/access/mosques/'+mid+'/change-requests/'+id+'/'+(approve?'approve':'reject'),{note});await load();status(approve?'تم اعتماد التعديل وتنفيذه':'تم رفض طلب التعديل');
+ });
+});
+
 // v19 learning tools. Student/guardian views only receive their own private records.
 let learningData=null,studentLearning=null,contestData=[],queueState=null;
 const form19=(id,body,attrs='')=>'<form id="'+id+'" data-learning class="halaqat-form" '+attrs+'>'+body+'</form>';
@@ -334,7 +390,7 @@ const staff19=()=>data.user.role!=='halaqa_student',manager19=()=>['owner','hala
 function renderLearningDashboard(){
  let h='';
  if(manager19()){
- h+=panel('كشف البيانات الناقصة','<p>يعرض الكشف نقص رقم جوال التواصل أو الحساب الفعال فقط. الهوية وتاريخ الميلاد والصف الدراسي اختيارية. إصدار الحساب وربطه من صلاحية المالك.</p><label>بحث<input id="missingSearch" type="search"></label>'+learningData.missing.map(x=>'<div class="halaqat-card" data-missing-name="'+esc(x.name)+'"><strong>'+esc(x.name)+'</strong><p>'+esc(x.ring)+' · '+esc(x.fields.join('، '))+'</p>'+button('استكمال الملف','data-file="'+x.student_id+'"')+'</div>').join('')+(learningData.missing.length?'':empty('بيانات الطلاب الفعالين مكتملة.')));
+ h+=panel('كشف البيانات الناقصة','<p>يعرض فقط الطلاب الذين لم تُصدر لهم حسابات بأسماء مستخدمين. نقص رقم الجوال أو البيانات الاختيارية لا يُظهر الطالب هنا. إصدار الحساب وربطه من صلاحية المالك.</p><label>بحث<input id="missingSearch" type="search"></label>'+learningData.missing.map(x=>'<div class="halaqat-card" data-missing-name="'+esc(x.name)+'"><strong>'+esc(x.name)+'</strong><p>'+esc(x.ring)+' · '+esc(x.fields.join('، '))+'</p>'+button('استكمال الملف','data-file="'+x.student_id+'"')+'</div>').join('')+(learningData.missing.length?'':empty('جميع الطلاب مرتبطون بحسابات بأسماء مستخدمين.')));
  h+=panel('المدرس البديل المؤقت',form19('substituteForm',select('halaqa_id','الحلقة',ringOpts())+select('user_id','المدرس البديل',[['','اختر مدرسًا'],...learningData.teachers.map(t=>[t.id,t.name])])+input('start','بداية التكليف',today(),'date')+input('end','نهاية التكليف',today(),'date')+'<button>تعيين مدرس بديل</button><small>الصلاحية تشمل أيام البداية والنهاية بتوقيت الرياض وتنتهي تلقائيًا. التكليف الدائم إن وجد يبقى ساريًا.</small>')+learningData.substitutes.map(s=>'<div class="halaqat-card"><strong>'+esc(s.name)+'</strong><p>'+esc(s.ring)+' · '+s.start+' — '+s.end+(s.expired?' · منتهٍ':'')+'</p>'+button('إلغاء التكليف','data-revoke-sub="'+s.id+'" data-ring="'+s.halaqa_id+'"')+'</div>').join(''));
  }
  h+=panel('دور التسميع',form19('queueViewForm',select('halaqa_id','الحلقة',ringOpts())+input('day','اليوم',today(),'date')+'<button>عرض / تحديث الدور</button>')+'<div id="queueResult"></div><small>اضغط تحديث لمعرفة آخر دور. الطالب وولي الأمر يشاهدان أدوارهما فقط.</small>');

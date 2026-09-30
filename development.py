@@ -8,7 +8,7 @@ from pydantic import Field, model_validator, ValidationError
 from sqlalchemy import select, func, delete, or_
 from app.db.session import get_db
 from app.models import (User, Mosque, AuthSession, AuditLog, Halaqa, HalaqaStudent, HalaqaProgress, HalaqaAccountRequest, StudentExam,
- QuranRecord, RingCalendar, CalendarException, AbsenceExcuse, StudentMessage, ThreadRead, Announcement, OrganizedExam, OrganizedResult, ImportPreview)
+ QuranRecord, RingCalendar, CalendarException, AbsenceExcuse, StudentMessage, ThreadRead, Announcement, OrganizedExam, OrganizedResult, ImportPreview, HalaqaChangeRequest)
 from app.api.halaqat import Input, StudentRequestInput, _require, _actor, _ring_ids_for, _user_pack, PORTAL_ROLES, STUDENT_ROLE, SUPERVISOR_ROLE, TEACHER_ROLE
 from app.api.student_file import access_student, today
 from app.api.routes import audit, audit_change
@@ -274,8 +274,15 @@ class ArchiveInput(Input):
 def archive_student(mid:int,sid:int,data:ArchiveInput,request:Request,db=Depends(get_db)):
     u=_require(request,db,mid,{SUPERVISOR_ROLE});row=db.get(HalaqaStudent,sid)
     if not row or row.halaqa_id not in _ring_ids_for(u,mid,db):raise HTTPException(404,'الطالب غير موجود')
-    before=row.active;row.active=data.active
-    audit_change(db,u.id,mid,'student_archive_changed',sid,{'active':before},data.model_dump());db.commit();return {'ok':True}
+    before=row.active
+    if u.role==SUPERVISOR_ROLE:
+        req=HalaqaChangeRequest(mosque_id=mid,requested_by=u.id,action_type='student_archive',target_type='student',target_id=row.id,
+            before_json=json.dumps({'active':bool(before)},ensure_ascii=False),after_json=json.dumps({'active':bool(data.active)},ensure_ascii=False),
+            reason=data.reason,status='pending')
+        db.add(req);db.flush();audit(db,u.id,mid,'change_request_created',f'{req.id}:student_archive');db.commit()
+        return {'ok':True,'pending_approval':True,'request_id':req.id,'message':'تم رفع طلب تغيير حالة الطالب للمدير العام للموافقة'}
+    row.active=data.active
+    audit_change(db,u.id,mid,'student_archive_changed',sid,{'active':before},data.model_dump());db.commit();return {'ok':True,'pending_approval':False}
 
 @router.put('/mosques/{mid}/users/{uid}/archive')
 def archive_user(mid:int,uid:int,data:ArchiveInput,request:Request,db=Depends(get_db)):
@@ -322,7 +329,7 @@ def development_dashboard(mid:int,request:Request,db=Depends(get_db)):
         pending=[{'id':x.id,'student_id':x.student_id,'name':db.get(HalaqaStudent,x.student_id).full_name,'day':str(x.day),'reason':x.reason} for x in db.scalars(select(AbsenceExcuse).where(AbsenceExcuse.student_id.in_(sids),AbsenceExcuse.status=='pending'))]
     archives=[{'id':s.id,'name':s.full_name,'halaqa_id':s.halaqa_id} for s in db.scalars(select(HalaqaStudent).where(HalaqaStudent.halaqa_id.in_(ids),HalaqaStudent.active.is_(False)))] if u.role in ('owner',SUPERVISOR_ROLE) else []
     upcoming=[{'id':e.id,'student_id':e.student_id,'name':db.get(HalaqaStudent,e.student_id).full_name,'title':e.title,'due':str(e.due)} for e in db.scalars(select(OrganizedExam).where(OrganizedExam.student_id.in_(sids),OrganizedExam.status=='scheduled').order_by(OrganizedExam.due))]
-    return {'calendars':calendars,'announcements':[{'id':a.id,'title':a.title,'body':a.body,'ring':db.get(Halaqa,a.halaqa_id).name if a.halaqa_id else 'جميع حلقات المسجد','expires':str(a.expires) if a.expires else '', 'can_archive':u.role=='owner' or (a.halaqa_id in ids and (u.role==SUPERVISOR_ROLE or a.created_by==u.id))} for a in anns], 'unread':unread,'pending_excuses':pending,'archived_students':archives,'upcoming_exams':upcoming}
+    return {'calendars':calendars,'announcements':[{'id':a.id,'halaqa_id':a.halaqa_id,'title':a.title,'body':a.body,'ring':db.get(Halaqa,a.halaqa_id).name if a.halaqa_id else 'جميع حلقات المسجد','expires':str(a.expires) if a.expires else '', 'can_archive':u.role=='owner' or (a.halaqa_id in ids and (u.role==SUPERVISOR_ROLE or a.created_by==u.id))} for a in anns], 'unread':unread,'pending_excuses':pending,'archived_students':archives,'upcoming_exams':upcoming}
 
 # Excel import stages validated requests; only the existing owner approval creates accounts.
 IMPORT_HEADERS=['اسم الطالب','المتابع','اسم ولي الأمر','جوال ولي الأمر','صلة القرابة','تاريخ الميلاد','الصف الدراسي','الحفظ الحالي','ملاحظات']

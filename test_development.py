@@ -94,7 +94,11 @@ def test_archiving_preserves_students_and_sessions(network):
     n=network;o=n['owner'];s=n['students'][0];sid=n['ids'][0];url=BASE+f'/students/{sid}'
     assert n['teachers'][0].post(url+'/progress',json={'day':str(today()),'memorized':'الفاتحة','memorized_amount':1}).status_code==200
     assert n['teachers'][0].put(url+'/archive',json={'active':False,'reason':'انتقل'}).status_code==403
-    assert n['supervisors'][0].put(url+'/archive',json={'active':False,'reason':'انتقل'}).status_code==200
+    requested=n['supervisors'][0].put(url+'/archive',json={'active':False,'reason':'انتقل'})
+    assert requested.status_code==200 and requested.json()['pending_approval'] is True
+    assert s.get(url+'/file').status_code==200  # لا ينفذ قبل اعتماد المالك
+    qid=requested.json()['request_id']
+    assert o.post(f'/api/access/mosques/1/change-requests/{qid}/approve',json={'note':'موافق'}).status_code==200
     assert s.get(url+'/file').status_code==404
     old=o.get(url+'/file').json();assert not old['can_edit'] and old['progress'][0]['memorized']=='الفاتحة'
     assert o.post(url+'/assignments',json={'due':str(today()),'memorization':'الناس'}).status_code==404

@@ -1,2 +1,2 @@
 // Current grouped interface browser regression suite.
-require('./browser-v20.cjs');
+require('./browser-v22.cjs');

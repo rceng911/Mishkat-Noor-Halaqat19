@@ -210,3 +210,120 @@ def remove_supervisor(mid:int,uid:int,data:RemoveSupervisor,request:Request,db=D
     db.execute(update(Halaqa).where(Halaqa.supervisor_id==uid).values(supervisor_id=None))
     audit(db,u.id,mid,'supervisor_removed',json.dumps({'id':uid,'name':target.full_name},ensure_ascii=False));db.commit()
     return {'ok':True}
+
+# --- Version 22: printable rosters and safe permanent student deletion ---
+
+def _v22_student_scope(db, request, mid: int, sid: int):
+    from app.api.halaqat import SUPERVISOR_ROLE, _ring_ids_for
+    u = _require(request, db, mid, {SUPERVISOR_ROLE})
+    s = db.get(HalaqaStudent, sid)
+    if not s:
+        raise HTTPException(404, 'الطالب غير موجود')
+    ring = db.get(Halaqa, s.halaqa_id)
+    if not ring or ring.mosque_id != mid:
+        raise HTTPException(404, 'الطالب غير موجود في هذا الفرع')
+    if u.role != 'owner' and s.halaqa_id not in _ring_ids_for(u, mid, db):
+        raise HTTPException(403, 'الطالب خارج نطاق صلاحيتك')
+    return u, s, ring
+
+
+def _v22_student_delete_plan(db, sid: int):
+    import hashlib
+    from app.db.session import Base
+    student = db.get(HalaqaStudent, sid)
+    if not student:
+        raise HTTPException(404, 'الطالب غير موجود')
+    exam_ids = list(db.scalars(select(OrganizedExam.id).where(OrganizedExam.student_id == sid)))
+    legacy_exam_ids = list(db.scalars(select(StudentExam.id).where(StudentExam.student_id == sid)))
+    counts = {}
+    for table in Base.metadata.sorted_tables:
+        if 'student_id' in table.c and any(f.target_fullname == 'halaqa_students.id' for f in table.c.student_id.foreign_keys):
+            counts[table.name] = int(db.scalar(select(func.count()).select_from(table).where(table.c.student_id == sid)) or 0)
+    counts['organized_exam_results'] = int(db.scalar(select(func.count(OrganizedResult.id)).where(or_(OrganizedResult.exam_id.in_(exam_ids), OrganizedResult.legacy_exam_id.in_(legacy_exam_ids)))) or 0) if (exam_ids or legacy_exam_ids) else 0
+    snapshot = {'id': student.id, 'name': student.full_name, 'halaqa_id': student.halaqa_id, 'user_id': student.user_id, 'counts': counts}
+    token = hashlib.sha256(json.dumps(snapshot, sort_keys=True, default=str, ensure_ascii=False).encode()).hexdigest()
+    return counts, token
+
+
+@router.get('/students/{sid}/deletion-preview')
+def v22_student_delete_preview(mid: int, sid: int, request: Request, db=Depends(get_db)):
+    _, student, _ = _v22_student_scope(db, request, mid, sid)
+    counts, token = _v22_student_delete_plan(db, sid)
+    return {'name': student.full_name, 'counts': counts, 'token': token}
+
+
+class V22DeleteStudent(Input):
+    confirm_name: str = Field(min_length=2, max_length=180)
+    token: str = Field(min_length=64, max_length=64)
+
+
+@router.delete('/students/{sid}')
+def v22_delete_student(mid: int, sid: int, data: V22DeleteStudent, request: Request, db=Depends(get_db)):
+    from app.db.session import Base
+    u, student, ring = _v22_student_scope(db, request, mid, sid)
+    counts, token = _v22_student_delete_plan(db, sid)
+    if data.confirm_name.strip() != student.full_name:
+        raise HTTPException(422, 'اكتب اسم الطالب كاملًا لتأكيد الحذف النهائي')
+    if data.token != token:
+        raise HTTPException(409, 'تغيرت بيانات الطالب؛ افتح تأكيد الحذف من جديد')
+    exam_ids = list(db.scalars(select(OrganizedExam.id).where(OrganizedExam.student_id == sid)))
+    legacy_exam_ids = list(db.scalars(select(StudentExam.id).where(StudentExam.student_id == sid)))
+    if exam_ids or legacy_exam_ids:
+        conds = []
+        if exam_ids: conds.append(OrganizedResult.exam_id.in_(exam_ids))
+        if legacy_exam_ids: conds.append(OrganizedResult.legacy_exam_id.in_(legacy_exam_ids))
+        db.execute(delete(OrganizedResult).where(or_(*conds)))
+    if exam_ids:
+        db.execute(update(OrganizedExam).where(OrganizedExam.next_exam_id.in_(exam_ids)).values(next_exam_id=None))
+    # Reverse dependency order removes child rows before plans/assignments/exams.
+    for table in reversed(Base.metadata.sorted_tables):
+        if table.name in {'halaqa_students', 'organized_exam_results'}:
+            continue
+        if 'student_id' in table.c and any(f.target_fullname == 'halaqa_students.id' for f in table.c.student_id.foreign_keys):
+            db.execute(delete(table).where(table.c.student_id == sid))
+    linked_user_id = student.user_id
+    name = student.full_name
+    db.delete(student)
+    audit(db, u.id, mid, 'student_permanently_deleted', json.dumps({'student_id': sid, 'name': name, 'ring_id': ring.id, 'linked_user_id': linked_user_id, 'counts': counts}, ensure_ascii=False))
+    db.commit()
+    return {'ok': True, 'name': name, 'linked_user_preserved': bool(linked_user_id), 'message': 'تم حذف ملف الطالب وسجلاته نهائيًا. حساب الدخول المرتبط لم يُحذف.'}
+
+
+@router.get('/rings/{rid}/roster.csv')
+def v22_roster_csv(mid: int, rid: int, request: Request, db=Depends(get_db)):
+    import csv, io
+    from app.api.halaqat import SUPERVISOR_ROLE, _ring_ids_for
+    from fastapi.responses import Response
+    u = _require(request, db, mid, {SUPERVISOR_ROLE})
+    ring = db.get(Halaqa, rid)
+    if not ring or ring.mosque_id != mid or (u.role != 'owner' and rid not in _ring_ids_for(u, mid, db)):
+        raise HTTPException(404, 'الحلقة غير متاحة')
+    rows = list(db.scalars(select(HalaqaStudent).where(HalaqaStudent.halaqa_id == rid, HalaqaStudent.active.is_(True))).all())
+    rows.sort(key=lambda x: (x.full_name or '').casefold())
+    out = io.StringIO(); w = csv.writer(out)
+    w.writerow(['اسم الطالب', 'رقم التواصل', 'ولي الأمر', 'صلة القرابة', 'الصف الدراسي'])
+    for s in rows:
+        linked = db.get(User, s.user_id) if s.user_id else None
+        phone = (linked.phone if linked and linked.phone else '') or s.guardian_phone or ''
+        w.writerow([s.full_name, phone, s.guardian_name or '', s.guardian_relation or '', s.school_grade or ''])
+    return Response('\ufeff' + out.getvalue(), media_type='text/csv; charset=utf-8', headers={'Content-Disposition': f'attachment; filename="ring-{rid}-roster.csv"'})
+
+
+@router.get('/rings/{rid}/roster')
+def v22_roster_print(mid: int, rid: int, request: Request, db=Depends(get_db)):
+    import html
+    from app.api.halaqat import SUPERVISOR_ROLE, _ring_ids_for
+    from fastapi.responses import HTMLResponse
+    u = _require(request, db, mid, {SUPERVISOR_ROLE})
+    ring = db.get(Halaqa, rid)
+    if not ring or ring.mosque_id != mid or (u.role != 'owner' and rid not in _ring_ids_for(u, mid, db)):
+        raise HTTPException(404, 'الحلقة غير متاحة')
+    rows = list(db.scalars(select(HalaqaStudent).where(HalaqaStudent.halaqa_id == rid, HalaqaStudent.active.is_(True))).all())
+    rows.sort(key=lambda x: (x.full_name or '').casefold())
+    body = []
+    for i, s in enumerate(rows, 1):
+        linked = db.get(User, s.user_id) if s.user_id else None
+        phone = (linked.phone if linked and linked.phone else '') or s.guardian_phone or ''
+        body.append(f'<tr><td>{i}</td><td>{html.escape(s.full_name)}</td><td dir="ltr">{html.escape(phone)}</td><td>{html.escape(s.guardian_name or "—")}</td><td>{html.escape(s.guardian_relation or "—")}</td></tr>')
+    page = f'''<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>{html.escape(ring.name)} - كشف الطلاب</title><style>body{{font-family:Tahoma,Arial,sans-serif;margin:28px;color:#173d2d}}h1{{margin-bottom:4px}}p{{color:#60736a}}table{{width:100%;border-collapse:collapse;margin-top:20px}}th,td{{border:1px solid #cad8d0;padding:9px;text-align:right}}th{{background:#eef5f0}}button{{padding:10px 18px;border:0;border-radius:8px;background:#0b6548;color:white;font-weight:bold}}@media print{{button{{display:none}}body{{margin:0}}}}</style></head><body><button onclick="window.print()">طباعة الكشف</button><h1>{html.escape(ring.name)}</h1><p>عدد الطلاب: {len(rows)} · الترتيب أبجدي تلقائي</p><table><thead><tr><th>#</th><th>اسم الطالب</th><th>رقم التواصل</th><th>ولي الأمر</th><th>صلة القرابة</th></tr></thead><tbody>{''.join(body)}</tbody></table></body></html>'''
+    return HTMLResponse(page, headers={'Cache-Control': 'no-store'})

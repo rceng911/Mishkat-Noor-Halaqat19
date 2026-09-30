@@ -1,4 +1,4 @@
-const CACHE='halaqat-shell-20.3';
+const CACHE='halaqat-shell-22';
 const SHELL=['/offline','/static/offline.js','/static/calm.css','/static/manifest.webmanifest','/static/brand-logo.png'];
 self.addEventListener('install',e=>{e.waitUntil(caches.open(CACHE).then(c=>c.addAll(SHELL)).then(()=>self.skipWaiting()));});
 self.addEventListener('activate',e=>e.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k.startsWith('halaqat-shell-')&&k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim())));

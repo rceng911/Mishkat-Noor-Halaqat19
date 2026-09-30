@@ -1,10 +1,8 @@
-.venv
-.git
+.venv/
 .env
-data
-backups
-__pycache__
-.pytest_cache
-tests
-*.zip
+data/
+backups/
+__pycache__/
+.pytest_cache/
+*.pyc
 

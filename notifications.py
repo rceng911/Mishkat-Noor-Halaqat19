@@ -1,96 +1,152 @@
-import base64, hashlib, json, secrets
-from datetime import datetime,timedelta
-from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import Field
-from sqlalchemy import select, delete, func
-from app.db.session import get_db
-from app.models import NotificationPreference, PushSubscription, NotificationJob
-from app.api.halaqat import Input, _actor
-from app.services.notifications import CATEGORIES, preference, keypair, valid_endpoint, enqueue, smtp_ready
+"""Transactional outbox. Generic payloads keep student details off lock screens."""
+import base64, hashlib, json, os, secrets, smtplib, ssl, threading, logging
+from datetime import datetime, timedelta
+from email.message import EmailMessage
+from urllib.parse import urlsplit
+from sqlalchemy import select, event, inspect, update
+from sqlalchemy.orm import Session
+from app.db.session import SessionLocal
+from app.models import (PushKey, PushSubscription, NotificationPreference, NotificationJob, User, HalaqaStudent,
+ Halaqa, HalaqaProgress, Assignment, StudentCertificate, StudentMessage, OrganizedExam, OrganizedResult, AbsenceExcuse)
 
-router=APIRouter(prefix='/api/notifications')
+log=logging.getLogger(__name__)
+CATEGORIES={'attendance':'الحضور والغياب','progress':'التقييم والتسميع','assignment':'الأوراد','achievement':'الإنجازات','message':'المراسلات','exam':'الاختبارات'}
 
-def pref(db,uid):
-    p=preference(db,uid)
-    if not p:p=NotificationPreference(user_id=uid);db.add(p);db.flush()
-    return p
+def public_url():
+    raw=os.getenv('PUBLIC_URL',os.getenv('RENDER_EXTERNAL_URL','')).rstrip('/')
+    return raw if raw.startswith('https://') else ''
 
-@router.get('/settings')
-def settings(request:Request,db=Depends(get_db)):
-    u=_actor(request,db);p=pref(db,u.id);k=keypair(db);db.commit()
-    return {'user_id':u.id,'public_key':k.public,'email':p.email,'verified':p.verified,'email_enabled':p.email_enabled,'push_enabled':p.push_enabled,'categories':json.loads(p.categories),'labels':CATEGORIES,'smtp_ready':smtp_ready(),
-      'delivery':dict(db.execute(select(NotificationJob.status,func.count(NotificationJob.id)).where(NotificationJob.user_id==u.id).group_by(NotificationJob.status)).all())}
+def smtp_ready():
+    return bool(os.getenv('SMTP_HOST') and os.getenv('SMTP_FROM') and public_url())
 
-class PreferencesInput(Input):
-    email_enabled:bool=False
-    push_enabled:bool=True
-    categories:list[str]=Field(default_factory=list,max_length=6)
+def keypair(db):
+    row=db.get(PushKey,1)
+    if row:return row
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives import serialization
+    k=ec.generate_private_key(ec.SECP256R1())
+    private=k.private_bytes(serialization.Encoding.PEM,serialization.PrivateFormat.PKCS8,serialization.NoEncryption()).decode()
+    public=base64.urlsafe_b64encode(k.public_key().public_bytes(serialization.Encoding.X962,serialization.PublicFormat.UncompressedPoint)).decode().rstrip('=')
+    row=PushKey(id=1,private=private,public=public);db.add(row);db.flush();return row
 
-@router.put('/settings')
-def save(data:PreferencesInput,request:Request,db=Depends(get_db)):
-    u=_actor(request,db);p=pref(db,u.id)
-    if any(c not in CATEGORIES for c in data.categories):raise HTTPException(422,'نوع تنبيه غير صحيح')
-    if data.email_enabled and (not p.verified or not smtp_ready()):raise HTTPException(422,'وثق البريد وتأكد من تفعيل خدمة الإرسال أولًا')
-    p.email_enabled=data.email_enabled;p.push_enabled=data.push_enabled;p.categories=json.dumps(sorted(set(data.categories)));db.commit();return {'ok':True}
-
-class SubscriptionInput(Input):
-    endpoint:str=Field(max_length=2048)
-    keys:dict[str,str]
-
-@router.post('/subscribe')
-def subscribe(data:SubscriptionInput,request:Request,db=Depends(get_db)):
-    u=_actor(request,db)
-    if not valid_endpoint(data.endpoint):raise HTTPException(422,'خادم إشعارات غير مدعوم؛ استخدم Safari أو Chrome أو Firefox')
+def valid_endpoint(endpoint):
     try:
-        raw=lambda k:base64.urlsafe_b64decode(data.keys[k]+'='*(-len(data.keys[k])%4))
-        if len(raw('p256dh'))!=65 or len(raw('auth'))!=16:raise ValueError()
-    except Exception:raise HTTPException(422,'مفاتيح اشتراك غير صالحة')
-    h=hashlib.sha256(data.endpoint.encode()).hexdigest();row=db.scalar(select(PushSubscription).where(PushSubscription.endpoint_hash==h))
-    if not row:
-        if db.scalar(select(func.count(PushSubscription.id)).where(PushSubscription.user_id==u.id))>=10:raise HTTPException(422,'الحد الأقصى عشرة أجهزة')
-        row=PushSubscription(user_id=u.id,endpoint_hash=h);db.add(row)
-    row.user_id=u.id;row.subscription=json.dumps(data.model_dump(),sort_keys=True)
-    pref(db,u.id).push_enabled=True;db.commit();return {'ok':True}
+        p=urlsplit(endpoint);host=p.hostname or ''
+        return p.scheme=='https' and p.port in (None,443) and not p.username and not p.password and not p.fragment and (host=='fcm.googleapis.com' or host=='updates.push.services.mozilla.com' or host.endswith('.push.services.mozilla.com') or host.endswith('.push.apple.com') or host=='web.push.apple.com')
+    except ValueError:return False
 
-class EndpointInput(Input):
-    endpoint:str=Field(max_length=2048)
+def preference(db,uid):
+    return db.get(NotificationPreference,uid)
 
-@router.post('/unsubscribe')
-def unsubscribe(data:EndpointInput,request:Request,db=Depends(get_db)):
-    u=_actor(request,db);db.execute(delete(PushSubscription).where(PushSubscription.user_id==u.id,PushSubscription.endpoint_hash==hashlib.sha256(data.endpoint.encode()).hexdigest()));db.commit();return {'ok':True}
+def enqueue(db,uid,sid,category,body='يوجد تحديث جديد في حلقات مشكاة ونور. افتح حسابك للاطلاع.'):
+    u=db.get(User,uid);p=preference(db,uid)
+    if not u or not u.active or not p or category not in json.loads(p.categories):return
+    if p.push_enabled:
+        for sub in db.scalars(select(PushSubscription).where(PushSubscription.user_id==uid)):
+            db.add(NotificationJob(user_id=uid,student_id=sid,category=category,channel='push',destination=sub.subscription,body=body))
+    if p.email_enabled and p.verified and p.email:
+        db.add(NotificationJob(user_id=uid,student_id=sid,category=category,channel='email',destination=p.email,body=body))
 
-class EmailInput(Input):
-    email:str=Field(min_length=5,max_length=254,pattern=r'^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$')
+@event.listens_for(Session,'before_flush')
+def on_changes(db,context,instances):
+    events=set()
+    for obj in list(db.new)+list(db.dirty):
+        if obj not in db.new and not db.is_modified(obj,include_collections=False):continue
+        sid=getattr(obj,'student_id',None);category=None
+        if isinstance(obj,HalaqaProgress):category='attendance' if inspect(obj).attrs.attendance.history.has_changes() else 'progress'
+        elif isinstance(obj,Assignment):category='assignment'
+        elif isinstance(obj,StudentCertificate):category='achievement'
+        elif isinstance(obj,StudentMessage):category='message'
+        elif isinstance(obj,OrganizedExam):category='exam'
+        elif isinstance(obj,OrganizedResult):
+            exam=db.get(OrganizedExam,obj.exam_id);sid=exam.student_id if exam else None;category='exam'
+        elif isinstance(obj,AbsenceExcuse):category='attendance'
+        if not sid or not category:continue
+        s=db.get(HalaqaStudent,sid)
+        if not s or not s.active:continue
+        if s.user_id:events.add((s.user_id,sid,category))
+        if s.user_id and isinstance(obj,HalaqaProgress) and any(inspect(obj).attrs[k].history.has_changes() for k in ('memorized','revision','memorization_score','tajweed_score')):
+            events.add((s.user_id,sid,'progress'))
+        if isinstance(obj,(StudentMessage,AbsenceExcuse)):
+            from app.api.halaqat import _ring_ids_for, TEACHER_ROLE, SUPERVISOR_ROLE
+            mid=db.get(Halaqa,s.halaqa_id).mosque_id
+            for u in db.scalars(select(User).where(User.active.is_(True),User.role.in_(['owner',TEACHER_ROLE,SUPERVISOR_ROLE]))):
+                if (u.role=='owner' or u.mosque_id==mid) and s.halaqa_id in _ring_ids_for(u,mid,db):events.add((u.id,sid,category))
+            sender=getattr(obj,'sender_id',None) or getattr(obj,'submitted_by',None)
+            events.discard((sender,sid,category))
+    # Coalesce changes in one transaction per student/recipient and respect categories.
+    sent=set()
+    for uid,sid,category in sorted(events):
+        p=preference(db,uid)
+        if (uid,sid) not in sent and p and category in json.loads(p.categories):
+            enqueue(db,uid,sid,category);sent.add((uid,sid))
 
-@router.post('/email')
-def email(data:EmailInput,request:Request,db=Depends(get_db)):
-    u=_actor(request,db);p=pref(db,u.id);now=datetime.utcnow()
-    if not smtp_ready():raise HTTPException(503,'إرسال البريد غير مفعّل؛ يضبط المالك إعدادات SMTP على الخادم')
-    if p.last_sent and p.last_sent>now-timedelta(minutes=2):raise HTTPException(429,'انتظر دقيقتين قبل طلب رمز آخر')
-    p.email=data.email.strip().lower();p.verified=False;p.email_enabled=False;p.attempts=0;p.last_sent=now
-    token=str(secrets.randbelow(900000)+100000);p.code_hash=hashlib.sha256(token.encode()).hexdigest();p.code_expires=now+timedelta(minutes=15)
-    db.execute(delete(NotificationJob).where(NotificationJob.user_id==u.id,NotificationJob.category=='verification'))
-    db.add(NotificationJob(user_id=u.id,category='verification',channel='email',destination=p.email,body='رمز توثيق بريدك في حلقات مشكاة ونور: '+token+'\nصالح لمدة 15 دقيقة.'))
-    db.commit();return {'ok':True,'message':'أضيف رمز التحقق إلى قائمة الإرسال؛ راجع بريدك'}
+def allowed(db,job):
+    u=db.get(User,job.user_id)
+    if not u or not u.active:return False
+    p=preference(db,u.id)
+    if job.category=='verification':return bool(p and not p.verified and p.email==job.destination and p.code_expires and p.code_expires>datetime.utcnow())
+    if not p or job.category not in json.loads(p.categories):return False
+    if job.channel=='email' and not (p.verified and p.email_enabled and p.email==job.destination):return False
+    if job.channel=='push' and (not p.push_enabled or not db.scalar(select(PushSubscription.id).where(PushSubscription.user_id==u.id,PushSubscription.subscription==job.destination))):return False
+    if job.student_id:
+        s=db.get(HalaqaStudent,job.student_id)
+        if not s or not s.active:return False
+        if u.role=='halaqa_student':return s.user_id==u.id
+        from app.api.halaqat import _ring_ids_for
+        mid=db.get(Halaqa,s.halaqa_id).mosque_id
+        return (u.role=='owner' or u.mosque_id==mid) and s.halaqa_id in _ring_ids_for(u,mid,db)
+    return True
 
-class CodeInput(Input):
-    code:str=Field(pattern=r'^\d{6}$')
+def send_email(destination,body):
+    msg=EmailMessage();msg['From']=os.environ['SMTP_FROM'];msg['To']=destination;msg['Subject']='حلقات مشكاة ونور'
+    msg.set_content(body+'\n\n'+public_url()+'/halaqat\nيمكن إيقاف التنبيهات من إعدادات حسابك.')
+    mode=os.getenv('SMTP_SECURITY','starttls');port=int(os.getenv('SMTP_PORT','465' if mode=='ssl' else '587'))
+    cls=smtplib.SMTP_SSL if mode=='ssl' else smtplib.SMTP
+    with cls(os.environ['SMTP_HOST'],port,timeout=15,**({'context':ssl.create_default_context()} if mode=='ssl' else {})) as smtp:
+        if mode!='ssl':smtp.starttls(context=ssl.create_default_context())
+        if os.getenv('SMTP_USER'):smtp.login(os.environ['SMTP_USER'],os.environ.get('SMTP_PASSWORD',''))
+        smtp.send_message(msg)
 
-@router.post('/email/verify')
-def verify(data:CodeInput,request:Request,db=Depends(get_db)):
-    u=_actor(request,db);p=pref(db,u.id)
-    if not p.code_expires or p.code_expires<datetime.utcnow() or p.attempts>=5:raise HTTPException(422,'الرمز منتهٍ؛ اطلب رمزًا جديدًا')
-    p.attempts+=1
-    if not secrets.compare_digest(p.code_hash,hashlib.sha256(data.code.encode()).hexdigest()):db.commit();raise HTTPException(422,'رمز غير صحيح')
-    p.verified=True;p.email_enabled=True;p.code_hash='';p.code_expires=None;db.commit();return {'ok':True}
+def deliver_one():
+    """Claim with compare-and-swap; failures retry, including after process restart."""
+    with SessionLocal() as db:
+        now=datetime.utcnow()
+        job=db.scalar(select(NotificationJob).where(NotificationJob.status.in_(['pending','sending']),NotificationJob.available_at<=now).order_by(NotificationJob.id).limit(1))
+        if not job:return False
+        old=job.available_at
+        if not db.execute(update(NotificationJob).where(NotificationJob.id==job.id,NotificationJob.available_at==old).values(status='sending',available_at=now+timedelta(minutes=3),attempts=NotificationJob.attempts+1)).rowcount:return True
+        db.commit();db.refresh(job)
+        if not allowed(db,job):job.status='cancelled';job.body='';db.commit();return True
+        try:
+            if job.channel=='email':
+                if not smtp_ready():raise RuntimeError('email_not_configured')
+                send_email(job.destination,job.body)
+            else:
+                from pywebpush import webpush
+                from py_vapid import Vapid
+                subscription=json.loads(job.destination)
+                if not valid_endpoint(subscription['endpoint']):raise RuntimeError('invalid_endpoint')
+                key=keypair(db);db.commit()
+                vapid=Vapid.from_pem(key.private.encode())
+                webpush(subscription_info=subscription,data=json.dumps({'title':'حلقات مشكاة ونور','body':job.body,'tag':'notice-'+str(job.id),'url':'/halaqat'},ensure_ascii=False),vapid_private_key=vapid,vapid_claims={'sub':os.getenv('VAPID_SUBJECT',public_url() or 'mailto:admin@example.com')},timeout=15,ttl=86400)
+            job.status='sent';job.body='';job.error=''
+        except Exception as ex:
+            code=getattr(getattr(ex,'response',None),'status_code',None)
+            if code in (404,410) and job.channel=='push':
+                for sub in db.scalars(select(PushSubscription).where(PushSubscription.user_id==job.user_id,PushSubscription.subscription==job.destination)):db.delete(sub)
+                job.status='expired'
+            else:job.status='failed' if job.attempts>=5 else 'pending'
+            job.error=('http_'+str(code)) if code else type(ex).__name__
+            job.available_at=now+timedelta(seconds=min(3600,30*2**job.attempts))
+        db.commit();return True
 
-@router.post('/test')
-def test(request:Request,db=Depends(get_db)):
-    u=_actor(request,db)
-    recent=db.scalar(select(NotificationJob.id).where(NotificationJob.user_id==u.id,NotificationJob.student_id.is_(None),NotificationJob.created_at>datetime.utcnow()-timedelta(minutes=1)))
-    if recent:raise HTTPException(429,'انتظر دقيقة قبل الاختبار التالي')
-    p=pref(db,u.id);cats=json.loads(p.categories)
-    if not cats:raise HTTPException(422,'فعّل نوع تنبيه واحدًا على الأقل')
-    enqueue(db,u.id,None,cats[0],'هذا تنبيه تجريبي من حلقات مشكاة ونور.');db.flush()
-    if not any(isinstance(x,NotificationJob) for x in db.new) and not db.scalar(select(NotificationJob.id).where(NotificationJob.user_id==u.id,NotificationJob.created_at>datetime.utcnow()-timedelta(seconds=2))):raise HTTPException(422,'فعّل إشعارات الجهاز أو وثّق البريد أولًا')
-    db.commit();return {'ok':True,'message':'تمت إضافة الاختبار لقائمة الإرسال؛ راجع حالة التسليم'}
+def start_worker():
+    stop=threading.Event()
+    def work():
+        while not stop.is_set():
+            try:found=deliver_one()
+            except Exception:
+                log.warning('Notification outbox retry required');found=False
+            stop.wait(1 if found else 10)
+    t=threading.Thread(target=work,daemon=True);t.start();return stop,t

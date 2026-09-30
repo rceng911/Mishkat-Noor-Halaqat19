@@ -60,8 +60,10 @@ from app.api.learning import router as learning_router
 app.include_router(learning_router)
 from app.api.advancement import router as advancement_router
 from app.api.notifications import router as notifications_router
+from app.api.access import router as access_router
 app.include_router(advancement_router)
 app.include_router(notifications_router)
+app.include_router(access_router)
 
 @app.get('/sw.js')
 def service_worker():

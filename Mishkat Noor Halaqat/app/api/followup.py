@@ -8,7 +8,7 @@ from pydantic import Field, model_validator
 from sqlalchemy import select
 from app.db.session import get_db
 from app.models import (User, Halaqa, HalaqaStudent, HalaqaAccountRequest, HalaqaProgress,
-    StudentCertificate, StudentExam, Assignment, AlertRead, ExamAppointment, FeatureSetting)
+    StudentCertificate, StudentExam, Assignment, AlertRead, ExamAppointment, FeatureSetting, HalaqaChangeRequest)
 from app.api.halaqat import (Input, StudentRequestInput, _require, _ring_ids_for, _request_pack,
     _clean_username, _account_pack, STUDENT_ROLE, SUPERVISOR_ROLE, PORTAL_ROLES)
 from app.api.student_file import access_student, file_pack, today
@@ -160,9 +160,20 @@ def transfer(mid: int, sid: int, data: TransferInput, request: Request, db=Depen
     _, s = access_student(db, request, mid, sid, True)
     if data.halaqa_id not in _ring_ids_for(u, mid, db):
         raise HTTPException(403, 'الحلقة الجديدة خارج صلاحياتك')
-    old = s.halaqa_id; s.halaqa_id = data.halaqa_id
+    if s.halaqa_id == data.halaqa_id:
+        raise HTTPException(409, 'الطالب موجود أصلًا في هذه الحلقة')
+    old = s.halaqa_id
+    if u.role == SUPERVISOR_ROLE:
+        row = HalaqaChangeRequest(
+            mosque_id=mid, requested_by=u.id, action_type='student_transfer', target_type='student', target_id=s.id,
+            before_json=json.dumps({'halaqa_id': old}, ensure_ascii=False),
+            after_json=json.dumps({'halaqa_id': data.halaqa_id}, ensure_ascii=False),
+            reason='طلب نقل الطالب من ملفه', status='pending')
+        db.add(row); db.flush(); audit(db,u.id,mid,'change_request_created',f'{row.id}:student_transfer'); db.commit()
+        return {'ok': True, 'pending_approval': True, 'request_id': row.id, 'message': 'تم رفع طلب نقل الطالب للمدير العام للموافقة'}
+    s.halaqa_id = data.halaqa_id
     audit_change(db,u.id,mid,'student_transferred',sid,{'halaqa_id':old},{'halaqa_id':data.halaqa_id}); db.commit()
-    return {'ok': True}
+    return {'ok': True, 'pending_approval': False}
 
 
 class AttendanceRow(Input):

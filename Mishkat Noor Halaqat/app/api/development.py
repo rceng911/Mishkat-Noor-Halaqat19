@@ -8,7 +8,7 @@ from pydantic import Field, model_validator, ValidationError
 from sqlalchemy import select, func, delete, or_
 from app.db.session import get_db
 from app.models import (User, Mosque, AuthSession, AuditLog, Halaqa, HalaqaStudent, HalaqaProgress, HalaqaAccountRequest, StudentExam,
- QuranRecord, RingCalendar, CalendarException, AbsenceExcuse, StudentMessage, ThreadRead, Announcement, OrganizedExam, OrganizedResult, ImportPreview)
+ QuranRecord, RingCalendar, CalendarException, AbsenceExcuse, StudentMessage, ThreadRead, Announcement, OrganizedExam, OrganizedResult, ImportPreview, HalaqaChangeRequest)
 from app.api.halaqat import Input, StudentRequestInput, _require, _actor, _ring_ids_for, _user_pack, PORTAL_ROLES, STUDENT_ROLE, SUPERVISOR_ROLE, TEACHER_ROLE
 from app.api.student_file import access_student, today
 from app.api.routes import audit, audit_change
@@ -274,8 +274,15 @@ class ArchiveInput(Input):
 def archive_student(mid:int,sid:int,data:ArchiveInput,request:Request,db=Depends(get_db)):
     u=_require(request,db,mid,{SUPERVISOR_ROLE});row=db.get(HalaqaStudent,sid)
     if not row or row.halaqa_id not in _ring_ids_for(u,mid,db):raise HTTPException(404,'الطالب غير موجود')
-    before=row.active;row.active=data.active
-    audit_change(db,u.id,mid,'student_archive_changed',sid,{'active':before},data.model_dump());db.commit();return {'ok':True}
+    before=row.active
+    if u.role==SUPERVISOR_ROLE:
+        req=HalaqaChangeRequest(mosque_id=mid,requested_by=u.id,action_type='student_archive',target_type='student',target_id=row.id,
+            before_json=json.dumps({'active':bool(before)},ensure_ascii=False),after_json=json.dumps({'active':bool(data.active)},ensure_ascii=False),
+            reason=data.reason,status='pending')
+        db.add(req);db.flush();audit(db,u.id,mid,'change_request_created',f'{req.id}:student_archive');db.commit()
+        return {'ok':True,'pending_approval':True,'request_id':req.id,'message':'تم رفع طلب تغيير حالة الطالب للمدير العام للموافقة'}
+    row.active=data.active
+    audit_change(db,u.id,mid,'student_archive_changed',sid,{'active':before},data.model_dump());db.commit();return {'ok':True,'pending_approval':False}
 
 @router.put('/mosques/{mid}/users/{uid}/archive')
 def archive_user(mid:int,uid:int,data:ArchiveInput,request:Request,db=Depends(get_db)):
